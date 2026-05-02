@@ -3,9 +3,11 @@ import json
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
+import requests
 from dotenv import load_dotenv
 from telegram import Update, BotCommand
 from telegram.ext import Application, CommandHandler, ContextTypes
+import sqlite_store
 
 
 def _required(name: str) -> str:
@@ -37,6 +39,25 @@ STATE_PATH = os.path.join(HERE, "state.json")
 STATUS_PATH = os.path.join(HERE, "engine_status.json")
 CUM_PATH = os.path.join(HERE, "cumulative.json")
 TRADES_PATH = os.path.join(HERE, "trades.jsonl")
+AI_SIGNAL_PATH = os.path.join(HERE, "ai_signal.json")
+
+AI_ENDPOINTS = [
+    {"key": "local", "label": "Local", "provider": "ollama", "baseUrl": "http://127.0.0.1:11434/v1"},
+    {"key": "battlestation_gpu", "label": "Battlestation GPU", "provider": "ollama", "baseUrl": "http://192.168.1.20:11435/v1"},
+    {"key": "battlestation_cpu", "label": "Battlestation CPU", "provider": "ollama", "baseUrl": "http://192.168.1.20:11436/v1"},
+    {"key": "custom", "label": "Custom", "provider": "ollama", "baseUrl": ""},
+]
+AI_ENDPOINT_BY_KEY = {item["key"]: item for item in AI_ENDPOINTS}
+AI_ENDPOINT_ALIASES = {
+    "local": "local",
+    "gpu": "battlestation_gpu",
+    "battlestation_gpu": "battlestation_gpu",
+    "battlestation-gpu": "battlestation_gpu",
+    "cpu": "battlestation_cpu",
+    "battlestation_cpu": "battlestation_cpu",
+    "battlestation-cpu": "battlestation_cpu",
+    "custom": "custom",
+}
 
 # Trend instance paths
 STATE_TREND_PATH = os.path.join(HERE, "state_trend.json")
@@ -46,11 +67,17 @@ TRADES_TREND_PATH = os.path.join(HERE, "trades_trend.jsonl")
 
 
 def _read_json(path: str) -> dict:
+    key = sqlite_store.snapshot_key_for_path(path)
+    if key and sqlite_store.has_snapshot(key):
+        return sqlite_store.read_snapshot(key)
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
 
 def _write_json(path: str, obj: dict) -> None:
+    key = sqlite_store.snapshot_key_for_path(path)
+    if key:
+        sqlite_store.write_snapshot(key, obj)
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(obj, f, indent=2, sort_keys=True)
@@ -94,6 +121,13 @@ def _read_cum() -> dict | None:
         return None
 
 
+def _read_ai_signal() -> dict | None:
+    try:
+        return _read_json(AI_SIGNAL_PATH)
+    except Exception:
+        return None
+
+
 def _read_cum_trend() -> dict | None:
     try:
         return _read_json(CUM_TREND_PATH)
@@ -103,6 +137,10 @@ def _read_cum_trend() -> dict | None:
 
 def _tail_trade_events(n: int, path: str) -> list[dict]:
     """Return last n ENTER/EXIT events from a trades.jsonl file."""
+    if os.path.basename(path) == "trades.jsonl":
+        rows = sqlite_store.list_events(limit=max(200, n * 10))
+        if rows:
+            return [e for e in rows if e.get("event") in ("ENTER", "EXIT")][-n:]
     if not os.path.exists(path):
         return []
 
@@ -156,7 +194,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _admin_only(update):
         return
     await update.message.reply_text(
-        "TradeBot control is online. GRID: /bind /status /summary /trades /pause /resume /panic /mode /set /maxdayloss /maxinvexp /scalpy /fatty /flexy | TREND: /status_trend /summary_trend /trades_trend /pause_trend /resume_trend /panic_trend /mode_trend /set_trend"
+        "TradeBot control is online. GRID: /bind /status /summary /trades /pause /resume /panic /mode /set /maxdayloss /maxinvexp /scalpy /fatty /flexy | AI: /ai_status /ai_on /ai_off /ai_review /ai_models /ai_endpoint /ai_model | TREND: /status_trend /summary_trend /trades_trend /pause_trend /resume_trend /panic_trend /mode_trend /set_trend"
     )
 
 
@@ -228,6 +266,198 @@ async def status_trend(update: Update, context: ContextTypes.DEFAULT_TYPE):
     st = _read_status_trend()
     cum = _read_cum_trend()
     await _status_for(update, label="TREND", state=s, st=st, cum=cum)
+
+
+def _ai_age(ts: str | None) -> str:
+    if not ts:
+        return "unknown"
+    try:
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(timezone.utc)
+        return f"{(datetime.now(timezone.utc) - dt).total_seconds():.0f}s"
+    except Exception:
+        return "unknown"
+
+
+def _normalize_ai_base_url(base_url: str | None) -> str:
+    return str(base_url or "").strip().rstrip("/")
+
+
+def _ai_endpoint_key(state: dict) -> str:
+    selected = state.get("aiEndpointKey")
+    if selected in AI_ENDPOINT_BY_KEY:
+        if selected != "custom":
+            selected_url = _normalize_ai_base_url(AI_ENDPOINT_BY_KEY[selected]["baseUrl"])
+            state_url = _normalize_ai_base_url(state.get("aiBaseUrl") or "")
+            if state_url and state_url != selected_url:
+                return "custom"
+        return str(selected)
+    base_url = _normalize_ai_base_url(state.get("aiBaseUrl") or os.getenv("TRADEBOT_AI_BASE_URL") or "")
+    for endpoint in AI_ENDPOINTS:
+        if endpoint["key"] != "custom" and _normalize_ai_base_url(endpoint["baseUrl"]) == base_url:
+            return endpoint["key"]
+    return "custom"
+
+
+def _active_ai_endpoint(state: dict) -> dict:
+    key = _ai_endpoint_key(state)
+    endpoint = dict(AI_ENDPOINT_BY_KEY.get(key) or AI_ENDPOINT_BY_KEY["custom"])
+    if key == "custom":
+        endpoint["baseUrl"] = _normalize_ai_base_url(state.get("aiBaseUrl") or os.getenv("TRADEBOT_AI_BASE_URL") or "")
+        endpoint["provider"] = str(state.get("aiProvider") or endpoint.get("provider") or "ollama")
+    return endpoint
+
+
+def _ai_model_urls(base_url: str) -> list[str]:
+    base_url = _normalize_ai_base_url(base_url)
+    if not base_url:
+        return []
+    urls = [f"{base_url}/models"]
+    if base_url.endswith("/v1"):
+        urls.append(f"{base_url[:-3]}/api/tags")
+    else:
+        urls.append(f"{base_url}/v1/models")
+        urls.append(f"{base_url}/api/tags")
+    return urls
+
+
+def _extract_ai_model_names(payload: dict) -> list[str]:
+    items = payload.get("data") or payload.get("models") or []
+    names = []
+    for item in items:
+        if isinstance(item, dict):
+            name = item.get("id") or item.get("name") or item.get("model")
+            if name:
+                names.append(str(name))
+        elif item:
+            names.append(str(item))
+    return list(dict.fromkeys(names))
+
+
+def _list_ai_models_for_url(base_url: str) -> list[str]:
+    for url in _ai_model_urls(base_url):
+        try:
+            response = requests.get(url, timeout=(0.35, 0.8))
+            response.raise_for_status()
+            return _extract_ai_model_names(response.json())
+        except Exception:
+            continue
+    return []
+
+
+def _list_ai_models(state: dict) -> list[str]:
+    return _list_ai_models_for_url(_active_ai_endpoint(state).get("baseUrl", ""))
+
+
+async def ai_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _admin_only(update):
+        return
+    state = _read_state()
+    signal = _read_ai_signal() or {}
+    status_payload = _read_status() or {}
+    status_ai = ((status_payload.get("stats") or {}).get("ai") or {})
+    ai = signal or status_ai
+    endpoint = _active_ai_endpoint(state)
+    msg = (
+        "GRID AI Status\n"
+        f"enabled={state.get('aiEnabled')} dryRun={state.get('aiDryRun', False)} shadow={state.get('aiShadowMode', False)}\n"
+        f"endpoint={endpoint.get('label')} provider={state.get('aiProvider')} base={state.get('aiBaseUrl')}\n"
+        f"quick={state.get('aiQuickModel') or state.get('aiModel')} deep={state.get('aiDeepModel') or state.get('aiFallbackModel') or state.get('aiModel')}\n"
+        f"decision={ai.get('decisionId', '--')} age={_ai_age(ai.get('tsUtc'))} stale={ai.get('stale', False)}\n"
+        f"action={ai.get('riskAction', '--')} gridAllowed={ai.get('gridAllowed', '--')} confidence={float(ai.get('confidence') or 0):.2f}\n"
+        f"regime={ai.get('regime', '--')} bias={ai.get('directionBias', '--')} model={ai.get('model', '--')}\n"
+        f"note={ai.get('note', '')[:600]}"
+    )
+    await update.message.reply_text(msg)
+
+
+async def ai_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _admin_only(update):
+        return
+    state = _read_state()
+    state["aiEnabled"] = True
+    _write_state(state)
+    await update.message.reply_text("GRID AI enabled. The sidecar will publish the next local decision on its poll interval.")
+
+
+async def ai_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _admin_only(update):
+        return
+    state = _read_state()
+    state["aiEnabled"] = False
+    _write_state(state)
+    await update.message.reply_text("GRID AI disabled.")
+
+
+async def ai_review(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _admin_only(update):
+        return
+    state = _read_state()
+    state["aiForceReviewNonce"] = datetime.now(timezone.utc).isoformat()
+    _write_state(state)
+    await update.message.reply_text("GRID AI review requested. The sidecar will pick it up on the next poll.")
+
+
+async def ai_models(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _admin_only(update):
+        return
+    state = _read_state()
+    active_key = _active_ai_endpoint(state).get("key")
+    blocks = []
+    for endpoint in AI_ENDPOINTS:
+        if endpoint["key"] == "custom" and active_key != "custom":
+            continue
+        base_url = endpoint["baseUrl"] or state.get("aiBaseUrl") or ""
+        names = _list_ai_models_for_url(base_url)
+        marker = " (active)" if endpoint["key"] == active_key else ""
+        if names:
+            blocks.append(f"{endpoint['label']}{marker}:\n" + "\n".join(f"- {name}" for name in names[:25]))
+        else:
+            blocks.append(f"{endpoint['label']}{marker}: no models found at {base_url or '(unset)'}")
+    await update.message.reply_text("GRID AI models\n" + "\n\n".join(blocks))
+
+
+async def ai_endpoint(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _admin_only(update):
+        return
+    state = _read_state()
+    if not context.args:
+        current = _active_ai_endpoint(state)
+        lines = [f"Current: {current.get('label')} -> {current.get('baseUrl') or '(unset)'}", "Use /ai_endpoint local, /ai_endpoint gpu, /ai_endpoint cpu, or /ai_endpoint custom http://host:port/v1"]
+        lines.extend(f"- {ep['key']}: {ep['label']} -> {ep['baseUrl'] or '(custom URL)'}" for ep in AI_ENDPOINTS)
+        await update.message.reply_text("\n".join(lines))
+        return
+    requested = AI_ENDPOINT_ALIASES.get(context.args[0].strip().lower())
+    if not requested:
+        await update.message.reply_text("Unknown endpoint. Use local, gpu, cpu, or custom.")
+        return
+    endpoint = AI_ENDPOINT_BY_KEY[requested]
+    state["aiEndpointKey"] = requested
+    state["aiProvider"] = endpoint.get("provider") or "ollama"
+    if requested == "custom":
+        if len(context.args) < 2:
+            await update.message.reply_text("Usage: /ai_endpoint custom http://host:port/v1")
+            return
+        state["aiBaseUrl"] = _normalize_ai_base_url(context.args[1])
+    else:
+        state["aiBaseUrl"] = endpoint["baseUrl"]
+    _write_state(state)
+    await update.message.reply_text(f"GRID AI endpoint set to {endpoint['label']} -> {state['aiBaseUrl']}")
+
+
+async def ai_model(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _admin_only(update):
+        return
+    if not context.args:
+        await update.message.reply_text("Usage: /ai_model <ollama-model-name>")
+        return
+    model = " ".join(context.args).strip()
+    state = _read_state()
+    state["aiModel"] = model
+    state["aiQuickModel"] = model
+    state["aiDeepModel"] = model
+    state["aiFallbackModel"] = model
+    _write_state(state)
+    await update.message.reply_text(f"GRID AI model set to {model} for primary, quick, deep, and fallback roles.")
 
 
 async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -685,6 +915,15 @@ async def _post_init(app: Application) -> None:
         BotCommand("fatty", "GRID fatty: wider spacing"),
         BotCommand("flexy", "GRID flexy: advisor chooses mode"),
 
+        # AI
+        BotCommand("ai_status", "GRID local AI status"),
+        BotCommand("ai_on", "Enable GRID local AI"),
+        BotCommand("ai_off", "Disable GRID local AI"),
+        BotCommand("ai_review", "Request next AI review"),
+        BotCommand("ai_models", "List GRID AI endpoint models"),
+        BotCommand("ai_endpoint", "Set GRID AI endpoint"),
+        BotCommand("ai_model", "Set GRID AI model"),
+
         # TREND
         BotCommand("status_trend", "TREND status"),
         BotCommand("summary_trend", "TREND status + recent trades"),
@@ -724,6 +963,13 @@ def main():
     app.add_handler(CommandHandler("scalpy", scalpy))
     app.add_handler(CommandHandler("fatty", fatty))
     app.add_handler(CommandHandler("flexy", flexy))
+    app.add_handler(CommandHandler("ai_status", ai_status))
+    app.add_handler(CommandHandler("ai_on", ai_on))
+    app.add_handler(CommandHandler("ai_off", ai_off))
+    app.add_handler(CommandHandler("ai_review", ai_review))
+    app.add_handler(CommandHandler("ai_models", ai_models))
+    app.add_handler(CommandHandler("ai_endpoint", ai_endpoint))
+    app.add_handler(CommandHandler("ai_model", ai_model))
 
     # TREND command set
     app.add_handler(CommandHandler("status_trend", status_trend))

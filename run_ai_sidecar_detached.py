@@ -62,6 +62,13 @@ def restart() -> int:
     return start()
 
 
+def status() -> int:
+    live = _live_pids()
+    if live:
+        return max(live)
+    return 0
+
+
 if __name__ == '__main__':
     import sys
     cmd = sys.argv[1] if len(sys.argv) > 1 else 'start'
@@ -72,5 +79,7 @@ if __name__ == '__main__':
         print('stopped')
     elif cmd == 'restart':
         print(restart())
+    elif cmd == 'status':
+        print(status())
     else:
         raise SystemExit(f'unknown command: {cmd}')

@@ -2,7 +2,7 @@ import os
 import requests
 
 BASE_URL = os.getenv('BASEROW_URL', 'http://127.0.0.1:8080').rstrip('/')
-TOKEN = os.getenv('BASEROW_TOKEN', 'DxYIq8BLJ0dTpHFDShfatGeCkNh7sTFA').strip()
+TOKEN = os.getenv('BASEROW_TOKEN', '').strip()
 BOT_ID = 3
 TABLE_IDS = {
     'orders': 761,
@@ -36,6 +36,8 @@ def delete_row(table_id: int, row_id: int):
 
 
 def main():
+    if not TOKEN:
+        raise RuntimeError('Missing BASEROW_TOKEN')
     deleted = []
     orders = [r for r in list_rows(TABLE_IDS['orders']) if any((b.get('id') == BOT_ID) for b in (r.get('bot') or []))]
     seen_order_nums = set()

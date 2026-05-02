@@ -3,7 +3,7 @@ import os
 import requests
 
 BASE_URL = os.getenv('BASEROW_URL', 'http://127.0.0.1:8080').rstrip('/')
-TOKEN = os.getenv('BASEROW_TOKEN', 'DxYIq8BLJ0dTpHFDShfatGeCkNh7sTFA').strip()
+TOKEN = os.getenv('BASEROW_TOKEN', '').strip()
 BOT_KEY = os.getenv('TRADEBOT_BOT_KEY', 'tradebot-grid-paper')
 
 TABLES = {
@@ -55,6 +55,8 @@ def is_placeholder_generic(row):
 
 
 def main():
+    if not TOKEN:
+        raise RuntimeError('Missing BASEROW_TOKEN')
     deleted = []
 
     bots = list_rows(TABLES['bots'])

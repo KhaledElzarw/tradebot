@@ -80,6 +80,8 @@ const stateUi = {
   freshnessTicker: null,
   hardStatusSyncTimer: null,
   hardChartSyncTimer: null,
+  dashboardSleeping: false,
+  heavyRefreshLoaded: false,
   marketRefreshMs: 1000,
   dashboardRefreshMs: 30 * 60 * 1000,
   chartSocket: null,
@@ -1499,6 +1501,7 @@ function stopLiveEventStream() {
 }
 
 function scheduleLiveEventReconnect() {
+  if (stateUi.dashboardSleeping || document.hidden) return;
   if (stateUi.liveEventReconnectTimer) return;
   stateUi.liveEventReconnectTimer = setTimeout(() => {
     stateUi.liveEventReconnectTimer = null;
@@ -1507,6 +1510,7 @@ function scheduleLiveEventReconnect() {
 }
 
 function startLiveEventStream() {
+  if (stateUi.dashboardSleeping || document.hidden) return;
   if (typeof EventSource === 'undefined') {
     if (!stateUi.marketRefreshTimer) scheduleMarketRefresh(stateUi.marketRefreshMs);
     return;
@@ -1599,9 +1603,11 @@ async function refresh() {
 }
 
 function scheduleMarketRefresh(delayMs = stateUi.marketRefreshMs) {
+  if (stateUi.dashboardSleeping || document.hidden) return;
   if (stateUi.marketRefreshTimer) clearTimeout(stateUi.marketRefreshTimer);
   stateUi.marketRefreshTimer = setTimeout(async () => {
     try {
+      if (stateUi.dashboardSleeping || document.hidden) return;
       const now = Date.now();
       const staleMs = Math.max(4000, Number(stateUi.marketRefreshMs || 1000) * 3);
       const sseLooksStale = stateUi.liveEventStreamActive && (now - Number(stateUi.liveEventLastDataAt || 0) > staleMs);
@@ -1609,21 +1615,25 @@ function scheduleMarketRefresh(delayMs = stateUi.marketRefreshMs) {
         await refreshMarket();
       }
     } finally {
-      scheduleMarketRefresh(stateUi.marketRefreshMs);
+      if (!stateUi.dashboardSleeping && !document.hidden) scheduleMarketRefresh(stateUi.marketRefreshMs);
     }
   }, Math.max(1000, Number(delayMs || 1000)));
 }
 
 function scheduleHardStatusSync() {
+  if (stateUi.dashboardSleeping || document.hidden) return;
   if (stateUi.hardStatusSyncTimer) clearInterval(stateUi.hardStatusSyncTimer);
   stateUi.hardStatusSyncTimer = setInterval(() => {
+    if (stateUi.dashboardSleeping || document.hidden) return;
     refreshMarket();
   }, Math.max(1000, Number(stateUi.marketRefreshMs || 1000)));
 }
 
 function scheduleHardChartSync() {
+  if (stateUi.dashboardSleeping || document.hidden) return;
   if (stateUi.hardChartSyncTimer) clearInterval(stateUi.hardChartSyncTimer);
   stateUi.hardChartSyncTimer = setInterval(async () => {
+    if (stateUi.dashboardSleeping || document.hidden) return;
     const staleFor = Date.now() - Number(stateUi.chartLastEventAt || 0);
     if (staleFor < 3500) return;
     try {
@@ -1644,15 +1654,34 @@ function scheduleHardChartSync() {
   }, 1500);
 }
 
-function scheduleDashboardRefresh(delayMs = stateUi.dashboardRefreshMs) {
+function stopDashboardActivity() {
+  stopLiveEventStream();
+  stopChartStream();
+  if (stateUi.marketRefreshTimer) clearTimeout(stateUi.marketRefreshTimer);
+  if (stateUi.hardStatusSyncTimer) clearInterval(stateUi.hardStatusSyncTimer);
+  if (stateUi.hardChartSyncTimer) clearInterval(stateUi.hardChartSyncTimer);
   if (stateUi.dashboardRefreshTimer) clearTimeout(stateUi.dashboardRefreshTimer);
-  stateUi.dashboardRefreshTimer = setTimeout(async () => {
-    try {
-      await refresh();
-    } finally {
-      scheduleDashboardRefresh(stateUi.dashboardRefreshMs);
-    }
-  }, Math.max(60_000, Number(delayMs || (30 * 60 * 1000))));
+  stateUi.marketRefreshTimer = null;
+  stateUi.hardStatusSyncTimer = null;
+  stateUi.hardChartSyncTimer = null;
+  stateUi.dashboardRefreshTimer = null;
+}
+
+function sleepDashboard(reason = 'hidden') {
+  stateUi.dashboardSleeping = true;
+  stopDashboardActivity();
+  setChartStreamStatus('stale', reason === 'hidden' ? 'sleeping' : reason);
+  const freshLabel = document.getElementById('fresh-label');
+  if (freshLabel && document.hidden) freshLabel.textContent = 'Dashboard sleeping while tab is hidden';
+}
+
+function wakeDashboard(reason = 'visible') {
+  stateUi.dashboardSleeping = false;
+  stateUi.liveEventLastDataAt = 0;
+  resyncChartHistory(reason);
+  scheduleMarketRefresh(stateUi.marketRefreshMs);
+  scheduleHardStatusSync();
+  scheduleHardChartSync();
 }
 
 loadLayout();
@@ -1660,22 +1689,22 @@ enableDrag();
 renderTimeframeControls();
 syncTimeframeUrl();
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden) resyncChartHistory('visible');
+  if (document.hidden) {
+    sleepDashboard('hidden');
+    return;
+  }
+  wakeDashboard('visible');
 });
 window.addEventListener('beforeunload', () => {
-  stopLiveEventStream();
-  stopChartStream();
+  sleepDashboard('unload');
   if (stateUi.freshnessTicker) clearInterval(stateUi.freshnessTicker);
-  if (stateUi.hardStatusSyncTimer) clearInterval(stateUi.hardStatusSyncTimer);
-  if (stateUi.hardChartSyncTimer) clearInterval(stateUi.hardChartSyncTimer);
-  if (stateUi.marketRefreshTimer) clearTimeout(stateUi.marketRefreshTimer);
-  if (stateUi.dashboardRefreshTimer) clearTimeout(stateUi.dashboardRefreshTimer);
 });
-resyncChartHistory('boot');
-refresh();
 startFreshnessTicker();
-startLiveEventStream();
-refreshMarket().finally(() => scheduleMarketRefresh(stateUi.marketRefreshMs));
-scheduleHardStatusSync();
-scheduleHardChartSync();
-scheduleDashboardRefresh(stateUi.dashboardRefreshMs);
+refresh().finally(() => {
+  stateUi.heavyRefreshLoaded = true;
+  if (document.hidden) {
+    sleepDashboard('hidden');
+    return;
+  }
+  wakeDashboard('boot');
+});

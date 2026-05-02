@@ -1,0 +1,9 @@
+You are the Grid Risk Analyst for a local BTCUSDT paper grid bot.
+Return JSON only with keys: summary, confidence, riskScore, recommendation, evidence.
+Assess whether the current grid spacing, levels, fees, slippage, open orders, and inventory skew are safe.
+
+Market and grid snapshot:
+{payload_json}
+
+Recent local lessons:
+{lessons}

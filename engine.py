@@ -1,28 +1,13 @@
 import json
 import os
 import time
-import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
 
 from bot import BinanceSpotREST
-from baserow_sync import BaserowSync
-
-
-def _fire_and_forget_sync(syncer, *, state, status_payload, runtime_payload, cumulative_payload):
-    def run():
-        try:
-            syncer.sync_tick(
-                state=state,
-                status_payload=status_payload,
-                runtime_payload=runtime_payload,
-                cumulative_payload=cumulative_payload,
-            )
-        except Exception as e:
-            _log(f"BASEROW_SYNC_ERROR {e}")
-    threading.Thread(target=run, daemon=True).start()
+import sqlite_store
 
 
 STATE_PATH = os.path.join(os.path.dirname(__file__), "state.json")
@@ -32,6 +17,7 @@ TRADES_PATH = os.path.join(os.path.dirname(__file__), "trades.jsonl")
 CUM_PATH = os.path.join(os.path.dirname(__file__), "cumulative.json")
 RUNTIME_PATH = os.path.join(os.path.dirname(__file__), "runtime_state.json")
 AI_SIGNAL_PATH = os.path.join(os.path.dirname(__file__), "ai_signal.json")
+DEFAULT_TRADES_PATH = TRADES_PATH
 
 # Load env from an explicit file (preferred) or default to .env in this folder.
 HERE = os.path.dirname(__file__)
@@ -39,11 +25,30 @@ _ENV_FILE = os.getenv("TRADEBOT_ENV_FILE") or os.path.join(HERE, ".env")
 load_dotenv(_ENV_FILE, override=False)
 
 
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except Exception:
+        return default
+
+
+RUNTIME_SNAPSHOT_MIN_SECONDS = max(1.0, _env_float("TRADEBOT_RUNTIME_SNAPSHOT_MIN_SECONDS", 15.0))
+RUNTIME_SNAPSHOT_MAX_SECONDS = max(
+    RUNTIME_SNAPSHOT_MIN_SECONDS,
+    _env_float("TRADEBOT_RUNTIME_SNAPSHOT_MAX_SECONDS", 60.0),
+)
+RUNTIME_SNAPSHOT_MARKET_CHANGE_BPS = max(0.0, _env_float("TRADEBOT_RUNTIME_SNAPSHOT_MARKET_CHANGE_BPS", 5.0))
+HEARTBEAT_LOG_SECONDS = max(0.0, _env_float("TRADEBOT_ENGINE_HEARTBEAT_LOG_SECONDS", 1.0))
+
+
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
 def _read_json(path: str) -> dict:
+    key = sqlite_store.snapshot_key_for_path(path)
+    if key and sqlite_store.has_snapshot(key):
+        return sqlite_store.read_snapshot(key)
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
@@ -62,6 +67,9 @@ def _atomic_json_write(path: str, obj: dict) -> None:
 
 
 def _write_json(path: str, obj: dict) -> None:
+    key = sqlite_store.snapshot_key_for_path(path)
+    if key:
+        sqlite_store.write_snapshot(key, obj)
     _atomic_json_write(path, obj)
 
 
@@ -73,23 +81,76 @@ def _log(msg: str) -> None:
 
 
 def _write_status(payload: dict) -> None:
+    sqlite_store.write_snapshot("engine_status", payload)
     _atomic_json_write(STATUS_PATH, payload)
 
 
 def _append_trade(event: dict) -> None:
+    if TRADES_PATH == DEFAULT_TRADES_PATH:
+        sqlite_store.append_event(event)
     with open(TRADES_PATH, "a", encoding="utf-8") as f:
         f.write(json.dumps(event, sort_keys=True) + "\n")
 
 
+def _safe_read_json(path: str) -> dict:
+    try:
+        return _read_json(path)
+    except Exception:
+        return {}
+
+
+def _pid_alive(pid: int | None) -> bool:
+    if not pid or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except Exception:
+        return False
+
+
+def _acquire_engine_lock() -> tuple[int, bool]:
+    current_pid = os.getpid()
+    runtime_state = _safe_read_json(RUNTIME_PATH)
+    owner_pid = int(runtime_state.get("enginePid") or 0)
+    had_existing_owner = bool(owner_pid and owner_pid != current_pid and _pid_alive(owner_pid))
+    if had_existing_owner:
+        raise RuntimeError(f"Engine already running with pid {owner_pid}")
+    is_fresh_start = int(runtime_state.get("enginePid") or 0) != current_pid
+    runtime_state["enginePid"] = current_pid
+    runtime_state["engineStartedAt"] = _utc_now().isoformat() if is_fresh_start else runtime_state.get("engineStartedAt") or _utc_now().isoformat()
+    runtime_state["savedAt"] = _utc_now().isoformat()
+    _write_runtime_state(runtime_state)
+    return current_pid, is_fresh_start
+
+
 def _read_cum() -> dict:
+    if sqlite_store.has_snapshot("cumulative"):
+        return _normalize_cumulative(sqlite_store.read_snapshot("cumulative"))
     if not os.path.exists(CUM_PATH):
-        return {"sinceUtc": None, "realizedPnlUsdt": 0.0, "feesPaidUsdt": 0.0, "trades": 0, "wins": 0, "losses": 0}
+        return {"sinceUtc": None, "realizedPnlUsdt": 0.0, "grossRealizedPnlUsdt": 0.0, "feesPaidUsdt": 0.0, "trades": 0, "wins": 0, "losses": 0}
     with open(CUM_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)
+        payload = json.load(f)
+    if "grossRealizedPnlUsdt" not in payload:
+        payload["grossRealizedPnlUsdt"] = float(payload.get("realizedPnlUsdt", 0.0) or 0.0) + float(payload.get("feesPaidUsdt", 0.0) or 0.0)
+    return _normalize_cumulative(payload)
 
 
 def _write_cum(c: dict) -> None:
-    _atomic_json_write(CUM_PATH, c)
+    payload = _normalize_cumulative(c)
+    sqlite_store.write_snapshot("cumulative", payload)
+    _atomic_json_write(CUM_PATH, payload)
+
+
+def _normalize_cumulative(c: dict) -> dict:
+    normalized = dict(c or {})
+    normalized["feesPaidUsdt"] = float(normalized.get("feesPaidUsdt", 0.0) or 0.0)
+    normalized["grossRealizedPnlUsdt"] = float(normalized.get("grossRealizedPnlUsdt", 0.0) or 0.0)
+    normalized["realizedPnlUsdt"] = normalized["grossRealizedPnlUsdt"] - normalized["feesPaidUsdt"]
+    normalized["trades"] = int(normalized.get("trades", 0) or 0)
+    normalized["wins"] = int(normalized.get("wins", 0) or 0)
+    normalized["losses"] = int(normalized.get("losses", 0) or 0)
+    return normalized
 
 
 def _serialize_grid(grid: "GridState | None") -> dict | None:
@@ -138,6 +199,8 @@ def _deserialize_grid(payload: dict | None) -> "GridState | None":
 
 
 def _read_runtime_state() -> dict:
+    if sqlite_store.has_snapshot("runtime_state"):
+        return sqlite_store.read_snapshot("runtime_state")
     if not os.path.exists(RUNTIME_PATH):
         return {}
     with open(RUNTIME_PATH, "r", encoding="utf-8") as f:
@@ -145,7 +208,225 @@ def _read_runtime_state() -> dict:
 
 
 def _write_runtime_state(payload: dict) -> None:
+    sqlite_store.write_snapshot("runtime_state", payload)
     _atomic_json_write(RUNTIME_PATH, payload)
+
+
+@dataclass
+class _SnapshotDecision:
+    should_persist: bool
+    reason: str
+    critical_signature: str
+    market_signature: str
+    market_values: dict
+    now_monotonic: float
+
+
+@dataclass
+class _SnapshotChangeGate:
+    min_interval_seconds: float
+    max_interval_seconds: float
+    market_change_bps: float
+    last_critical_signature: str | None = None
+    last_market_signature: str | None = None
+    last_market_values: dict | None = None
+    last_persist_monotonic: float | None = None
+
+    def evaluate(
+        self,
+        *,
+        critical_signature: str,
+        market_signature: str = "",
+        market_values: dict | None = None,
+        force: bool = False,
+        now_monotonic: float | None = None,
+    ) -> _SnapshotDecision:
+        now_value = time.monotonic() if now_monotonic is None else now_monotonic
+        market_payload = dict(market_values or {})
+        reason = "unchanged"
+        should_persist = False
+
+        if force:
+            should_persist = True
+            reason = "forced"
+        elif self.last_critical_signature is None:
+            should_persist = True
+            reason = "initial"
+        else:
+            elapsed = now_value - (self.last_persist_monotonic or 0.0)
+            if critical_signature != self.last_critical_signature:
+                should_persist = True
+                reason = "state_changed"
+            elif elapsed >= self.max_interval_seconds:
+                should_persist = True
+                reason = "refresh_interval"
+            elif elapsed >= self.min_interval_seconds:
+                if market_signature != (self.last_market_signature or ""):
+                    should_persist = True
+                    reason = "market_window_changed"
+                elif _market_values_moved(self.last_market_values or {}, market_payload, self.market_change_bps):
+                    should_persist = True
+                    reason = "market_moved"
+            else:
+                reason = "throttled"
+
+        return _SnapshotDecision(
+            should_persist=should_persist,
+            reason=reason,
+            critical_signature=critical_signature,
+            market_signature=market_signature,
+            market_values=market_payload,
+            now_monotonic=now_value,
+        )
+
+    def record(self, decision: _SnapshotDecision) -> None:
+        self.last_critical_signature = decision.critical_signature
+        self.last_market_signature = decision.market_signature
+        self.last_market_values = dict(decision.market_values)
+        self.last_persist_monotonic = decision.now_monotonic
+
+
+def _stable_signature(payload: dict) -> str:
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _round_snapshot_value(value, digits: int = 10):
+    if isinstance(value, bool) or value is None:
+        return value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return round(value, digits)
+    if isinstance(value, dict):
+        return {k: _round_snapshot_value(v, digits) for k, v in sorted(value.items())}
+    if isinstance(value, (list, tuple)):
+        return [_round_snapshot_value(v, digits) for v in value]
+    return value
+
+
+def _float_or_none(value):
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+
+def _relative_bps_moved(previous, current, bps: float) -> bool:
+    prev = _float_or_none(previous)
+    cur = _float_or_none(current)
+    if prev is None and cur is None:
+        return False
+    if prev is None or cur is None:
+        return True
+    if bps <= 0:
+        return cur != prev
+    if abs(prev) < 1e-12:
+        return abs(cur - prev) > 1e-12
+    return (abs(cur - prev) / abs(prev)) * 10_000.0 >= bps
+
+
+def _market_values_moved(previous: dict, current: dict, bps: float) -> bool:
+    keys = set(previous.keys()) | set(current.keys())
+    return any(_relative_bps_moved(previous.get(k), current.get(k), bps) for k in keys)
+
+
+def _ai_control_signature(ai_signal: dict | None) -> dict:
+    ai = ai_signal or {}
+    keys = [
+        "enabled",
+        "source",
+        "stale",
+        "decisionId",
+        "provider",
+        "model",
+        "riskAction",
+        "confidence",
+        "breakoutRisk",
+        "gridAllowed",
+        "pauseNewBuys",
+        "allowSellsOnly",
+        "flattenRecommended",
+        "reduceExposure",
+        "riskBudgetPct",
+        "recommendedSpacingPct",
+        "recommendedLevels",
+        "recommendedMaxExposurePct",
+        "recommendedMode",
+        "dryRun",
+        "shadowMode",
+    ]
+    return _round_snapshot_value({k: ai.get(k) for k in keys if k in ai}, 8)
+
+
+def _runtime_critical_payload(runtime_payload: dict) -> dict:
+    stats = runtime_payload.get("stats") or {}
+    stats_keys = [
+        "day",
+        "trades",
+        "closedTrades",
+        "entries",
+        "exits",
+        "hasOpenPosition",
+        "wins",
+        "losses",
+        "pnl_usdt",
+        "cooldown_until",
+    ]
+    return {
+        "enginePid": runtime_payload.get("enginePid"),
+        "paper": _round_snapshot_value(runtime_payload.get("paper") or {}, 10),
+        "stats": _round_snapshot_value({k: stats.get(k) for k in stats_keys if k in stats}, 10),
+        "grid": _round_snapshot_value(runtime_payload.get("grid"), 10),
+        "ai": _ai_control_signature(runtime_payload.get("ai") or {}),
+    }
+
+
+def _runtime_snapshot_change_inputs(runtime_payload: dict) -> tuple[str, str, dict]:
+    market = runtime_payload.get("market") or {}
+    candle = market.get("candle") or {}
+    stats = runtime_payload.get("stats") or {}
+    critical = _runtime_critical_payload(runtime_payload)
+    market_window = {
+        "openTimeMs": candle.get("openTimeMs"),
+        "closeTimeMs": candle.get("closeTimeMs"),
+    }
+    market_values = {
+        "price": market.get("price"),
+        "candleOpen": candle.get("open"),
+        "candleHigh": candle.get("high"),
+        "candleLow": candle.get("low"),
+        "candleClose": candle.get("close"),
+        "maxDrawdownPct": stats.get("max_drawdown_pct"),
+        "peakEquity": stats.get("peak_equity"),
+    }
+    return _stable_signature(critical), _stable_signature(market_window), market_values
+
+
+def _maybe_write_runtime_state(gate: _SnapshotChangeGate, runtime_payload: dict, *, force: bool = False) -> tuple[bool, str]:
+    critical_signature, market_signature, market_values = _runtime_snapshot_change_inputs(runtime_payload)
+    decision = gate.evaluate(
+        critical_signature=critical_signature,
+        market_signature=market_signature,
+        market_values=market_values,
+        force=force,
+    )
+    if not decision.should_persist:
+        return False, decision.reason
+    _write_runtime_state(runtime_payload)
+    gate.record(decision)
+    _log(f"RUNTIME_STATE_WRITE reason={decision.reason} savedAt={runtime_payload.get('savedAt')} ai_model={((runtime_payload.get('ai') or {}).get('model'))} has_ai={('ai' in runtime_payload)}")
+    return True, decision.reason
+
+
+def _should_emit_heartbeat_log(last_logged_monotonic: float | None, interval_seconds: float, *, now_monotonic: float | None = None) -> bool:
+    if interval_seconds <= 0:
+        return False
+    now_value = time.monotonic() if now_monotonic is None else now_monotonic
+    if last_logged_monotonic is None:
+        return True
+    return (now_value - last_logged_monotonic) >= interval_seconds
 
 
 def _required(name: str) -> str:
@@ -160,6 +441,8 @@ def _clamp(value: float, lo: float, hi: float) -> float:
 
 
 def _read_ai_signal() -> dict:
+    if sqlite_store.has_snapshot("ai_signal"):
+        return sqlite_store.read_snapshot("ai_signal")
     if not os.path.exists(AI_SIGNAL_PATH):
         return {}
     try:
@@ -170,7 +453,115 @@ def _read_ai_signal() -> dict:
 
 
 def _write_ai_signal(payload: dict) -> None:
+    sqlite_store.write_snapshot("ai_signal", payload)
     _atomic_json_write(AI_SIGNAL_PATH, payload)
+
+
+def _load_trade_events() -> list[dict]:
+    if TRADES_PATH == DEFAULT_TRADES_PATH:
+        rows = sqlite_store.list_events()
+        if rows:
+            return rows
+    if not os.path.exists(TRADES_PATH):
+        return []
+    rows: list[dict] = []
+    with open(TRADES_PATH, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rows.append(json.loads(line))
+            except Exception:
+                continue
+    return rows
+
+
+def _reconcile_accounting_from_trade_log(start_usdt: float, start_btc: float) -> dict:
+    usdt = float(start_usdt)
+    btc = float(start_btc)
+    realized = 0.0
+    gross_realized = 0.0
+    fees = 0.0
+    wins = 0
+    losses = 0
+    open_cost_basis = 0.0
+    anomalies: list[str] = []
+    active_engine_start_seen = False
+
+    for ev in _load_trade_events():
+        kind = ev.get("event")
+        qty = float(ev.get("qtyBtc") or 0.0)
+        notional = float(ev.get("notionalUsdt") or 0.0)
+        fee = float(ev.get("feeUsdt") or 0.0)
+
+        if kind == "ENGINE_START":
+            if active_engine_start_seen:
+                anomalies.append(f"duplicate_engine_start:{ev.get('tsUtc')}")
+            active_engine_start_seen = True
+            continue
+
+        active_engine_start_seen = False
+
+        if kind == "ENTER":
+            fees += fee
+            usdt -= (notional + fee)
+            btc += qty
+            open_cost_basis += (notional + fee)
+            continue
+        fee = float(ev.get("feeUsdt") or 0.0)
+
+        if kind == "ENTER":
+            fees += fee
+            usdt -= (notional + fee)
+            btc += qty
+            open_cost_basis += (notional + fee)
+            continue
+
+        if kind == "EXIT":
+            if qty <= 0:
+                continue
+            if qty > btc + 1e-12:
+                anomalies.append(f"oversell:{ev.get('tsUtc')} qty={qty} btc_before={btc}")
+                continue
+
+            fees += fee
+            usdt += (notional - fee)
+            btc_before = btc
+            btc -= qty
+
+            basis_sold = 0.0
+            if btc_before > 0 and open_cost_basis > 0:
+                basis_sold = open_cost_basis * (qty / btc_before)
+                open_cost_basis -= basis_sold
+            gross = float(ev.get("grossRealizedPnlUsdt") or (notional - basis_sold))
+            pnl = float(ev.get("realizedPnlUsdt") or (notional - fee - basis_sold))
+            gross_realized += gross
+            realized += pnl
+            if pnl >= 0:
+                wins += 1
+            else:
+                losses += 1
+
+    if abs(btc) < 1e-12:
+        btc = 0.0
+    if open_cost_basis < 0 and abs(open_cost_basis) < 1e-9:
+        open_cost_basis = 0.0
+
+    return {
+        "paper": {"usdt": usdt, "btc": btc},
+        "cumulative": {
+            "sinceUtc": None,
+            "realizedPnlUsdt": realized,
+            "grossRealizedPnlUsdt": gross_realized,
+            "feesPaidUsdt": fees,
+            "trades": wins + losses,
+            "wins": wins,
+            "losses": losses,
+        },
+        "openCostBasisUsdt": open_cost_basis,
+        "anomalies": anomalies,
+    }
 
 
 def _read_ai_decision_for_engine(state: dict) -> dict:
@@ -195,7 +586,70 @@ def _read_ai_decision_for_engine(state: dict) -> dict:
             signal = dict(signal)
             signal["stale"] = True
             signal["source"] = "invalid_signal_ts"
+    signal = dict(signal)
+
+    def _num(name: str, default: float, lo: float, hi: float) -> float:
+        try:
+            value = signal.get(name, default)
+            if isinstance(value, list) and value:
+                value = value[0]
+            value = float(value)
+        except Exception:
+            value = default
+        return _clamp(value, lo, hi)
+
+    def _bool(name: str, default: bool = False) -> bool:
+        value = signal.get(name, default)
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(value)
+
+    signal["confidence"] = _num("confidence", 0.0, 0.0, 1.0)
+    signal["breakoutRisk"] = _num("breakoutRisk", 0.0, 0.0, 1.0)
+    signal["recommendedSpacingPct"] = _num("recommendedSpacingPct", float(state.get("gridSpacingPct", 0.008) or 0.008), 0.003, 0.03)
+    signal["recommendedLevels"] = int(_num("recommendedLevels", float(state.get("gridLevels", 12) or 12), 4.0, 24.0))
+    signal["recommendedMaxExposurePct"] = _num("recommendedMaxExposurePct", float(state.get("gridMaxExposurePct", 0.35) or 0.35), 0.05, 0.60)
+    signal["riskBudgetPct"] = _num("riskBudgetPct", signal["recommendedMaxExposurePct"], 0.0, 1.0)
+    signal["gridAllowed"] = bool(signal.get("gridAllowed", True))
+    risk_action = signal.get("riskAction", "allow_grid")
+    if risk_action not in {"allow_grid", "pause_new_buys", "sells_only", "reduce_exposure", "flatten", "hold"}:
+        risk_action = "hold"
+    signal["riskAction"] = risk_action
+    signal["pauseNewBuys"] = _bool("pauseNewBuys", risk_action in {"pause_new_buys", "sells_only", "reduce_exposure", "flatten"})
+    signal["allowSellsOnly"] = _bool("allowSellsOnly", risk_action in {"sells_only", "reduce_exposure", "flatten"})
+    signal["flattenRecommended"] = _bool("flattenRecommended", risk_action == "flatten")
+    signal["reduceExposure"] = _bool("reduceExposure", risk_action in {"reduce_exposure", "flatten"})
+    signal["dryRun"] = _bool("dryRun", False)
+    signal["shadowMode"] = _bool("shadowMode", False)
+    mode = signal.get("recommendedMode")
+    if mode not in {"scalpy", "fatty"}:
+        signal["recommendedMode"] = state.get("gridMode", "scalpy")
     return signal
+
+
+def _ai_controls_active(ai_signal: dict) -> bool:
+    return (
+        bool(ai_signal.get("enabled"))
+        and not bool(ai_signal.get("stale"))
+        and not bool(ai_signal.get("dryRun"))
+        and not bool(ai_signal.get("shadowMode"))
+    )
+
+
+def _attach_ai_event_fields(event: dict, ai_signal: dict) -> dict:
+    if not ai_signal:
+        return event
+    if ai_signal.get("decisionId"):
+        event["aiDecisionId"] = ai_signal.get("decisionId")
+    if ai_signal.get("riskAction"):
+        event["aiRiskAction"] = ai_signal.get("riskAction")
+    if ai_signal.get("promptVersion"):
+        event["aiPromptVersion"] = ai_signal.get("promptVersion")
+    if ai_signal.get("confidence") is not None:
+        event["aiConfidence"] = ai_signal.get("confidence")
+    if ai_signal.get("model"):
+        event["aiModel"] = ai_signal.get("model")
+    return event
 
 
 def _tg_send(token: str, chat_id: int, text: str) -> None:
@@ -377,6 +831,7 @@ def _fill_order_paper(
         basis_sold = grid.cost_basis_usdt * (qty / btc_before)
         grid.cost_basis_usdt -= basis_sold
 
+    gross_realized = gross - basis_sold
     realized = proceeds - basis_sold
     return {
         "tsUtc": _utc_now().isoformat(),
@@ -391,12 +846,14 @@ def _fill_order_paper(
         "notionalUsdt": gross,
         "feeUsdt": fee,
         "slippageBps": slip_bps,
+        "grossRealizedPnlUsdt": gross_realized,
         "realizedPnlUsdt": realized,
         "paper": True,
     }
 
 
 def main():
+    engine_pid, is_fresh_start = _acquire_engine_lock()
     base_url = os.getenv("BINANCE_BASE_URL", "https://api.binance.com")
     # Use real (prod) market data by default; testnet klines can be garbage (spike wicks).
     md_url = os.getenv("BINANCE_MARKETDATA_URL", "https://api.binance.com")
@@ -416,42 +873,71 @@ def main():
     md = BinanceSpotREST(base_url=md_url, api_key=api_key, api_secret=api_secret)
 
     runtime_state = _read_runtime_state()
-    baserow_sync = BaserowSync()
+    runtime_snapshot_gate = _SnapshotChangeGate(
+        min_interval_seconds=RUNTIME_SNAPSHOT_MIN_SECONDS,
+        max_interval_seconds=RUNTIME_SNAPSHOT_MAX_SECONDS,
+        market_change_bps=RUNTIME_SNAPSHOT_MARKET_CHANGE_BPS,
+    )
+    last_heartbeat_log_monotonic: float | None = None
+    reconciled = _reconcile_accounting_from_trade_log(
+        start_usdt=float(state.get("paperStartUsdt", 10000.0)),
+        start_btc=float(state.get("paperStartBtc", 0.0)),
+    )
     paper_state = runtime_state.get("paper") or {}
     paper = PaperAccount(
-        usdt=float(paper_state.get("usdt", state.get("paperStartUsdt", 10000.0))),
-        btc=float(paper_state.get("btc", state.get("paperStartBtc", 0.0))),
+        usdt=float(reconciled["paper"].get("usdt", paper_state.get("usdt", state.get("paperStartUsdt", 10000.0)))),
+        btc=float(reconciled["paper"].get("btc", paper_state.get("btc", state.get("paperStartBtc", 0.0)))),
     )
 
     stats_state = runtime_state.get("stats") or {}
+    reconciled_cum = dict(reconciled["cumulative"])
     stats = Stats(
         day=stats_state.get("day", _day_key(_utc_now())),
-        trades=int(stats_state.get("trades", 0)),
-        wins=int(stats_state.get("wins", 0)),
-        losses=int(stats_state.get("losses", 0)),
-        pnl_usdt=float(stats_state.get("pnl_usdt", 0.0)),
+        trades=int(reconciled_cum.get("trades", 0)),
+        wins=int(reconciled_cum.get("wins", 0)),
+        losses=int(reconciled_cum.get("losses", 0)),
+        pnl_usdt=float(reconciled_cum.get("realizedPnlUsdt", 0.0)),
         max_drawdown_pct=float(stats_state.get("max_drawdown_pct", 0.0)),
         peak_equity=float(stats_state.get("peak_equity", 0.0)),
         cooldown_until=datetime.fromisoformat(stats_state["cooldown_until"]) if stats_state.get("cooldown_until") else None,
     )
 
     cum = _read_cum()
-    if not cum.get("sinceUtc"):
-        cum["sinceUtc"] = _utc_now().isoformat()
+    reconciled_cum["sinceUtc"] = cum.get("sinceUtc") or _utc_now().isoformat()
+    changed_cum = any(cum.get(k) != reconciled_cum.get(k) for k in reconciled_cum.keys())
+    cum = _normalize_cumulative(reconciled_cum)
+    if changed_cum:
         _write_cum(cum)
 
-    grid: GridState | None = _deserialize_grid(runtime_state.get("grid"))
+    if reconciled.get("anomalies"):
+        _log(f"ACCOUNTING_RECONCILE anomalies={'; '.join(reconciled['anomalies'])}")
 
-    _log(f"ENGINE_START mode={state.get('mode')} symbol={symbol} interval={interval} paper_equity_init_usdt={paper.usdt} paper_btc_init={paper.btc}")
-    start_event = {"tsUtc": _utc_now().isoformat(), "event": "ENGINE_START", "mode": state.get("mode"), "symbol": symbol, "paper": True}
-    _append_trade(start_event)
-    baserow_sync.sync_event(state=state, event=start_event, cumulative_payload=cum)
+    grid: GridState | None = _deserialize_grid(runtime_state.get("grid"))
+    if grid is not None:
+        grid.cost_basis_usdt = float(reconciled.get("openCostBasisUsdt", grid.cost_basis_usdt) or 0.0)
+        if paper.btc <= 0:
+            grid.active = False
+            grid.orders = []
+            grid.reserved_btc = 0.0
+            grid.cost_basis_usdt = 0.0
+
+    has_open_position = paper.btc > 0 or bool(grid and grid.active)
+    if is_fresh_start:
+        startup_event_name = "ENGINE_RESUME" if has_open_position else "ENGINE_START"
+        _log(f"{startup_event_name} mode={state.get('mode')} symbol={symbol} interval={interval} paper_equity_init_usdt={paper.usdt} paper_btc_init={paper.btc}")
+        start_event = {
+            "tsUtc": _utc_now().isoformat(),
+            "event": startup_event_name,
+            "mode": state.get("mode"),
+            "symbol": symbol,
+            "paper": True,
+            "enginePid": engine_pid,
+            "hasOpenPosition": has_open_position,
+        }
+        _append_trade(start_event)
 
     while True:
         state = _read_json(STATE_PATH)
-        if state.get("paused"):
-            time.sleep(1)
-            continue
 
         now = _utc_now()
         if _day_key(now) != stats.day:
@@ -485,16 +971,117 @@ def main():
             time.sleep(1)
             continue
 
-        # cooldown
-        if stats.cooldown_until and now < stats.cooldown_until:
-            time.sleep(1)
-            continue
-
         atr = _atr(high, low, close, period=14)
         ema20 = _ema(close[-60:], period=20)
         ema50 = _ema(close[-120:], period=50)
         trend_strength = abs(ema20 - ema50) / price
         ai_signal = _read_ai_decision_for_engine(state)
+        ai_live = _ai_controls_active(ai_signal)
+        ai_pause_new_buys = ai_live and (ai_signal.get("pauseNewBuys") or not ai_signal.get("gridAllowed", True))
+        ai_sells_only = ai_live and (ai_signal.get("allowSellsOnly") or ai_signal.get("riskAction") in {"sells_only", "flatten"})
+
+        inactive_reason = "paused" if state.get("paused") else None
+        if inactive_reason is None and stats.cooldown_until and now < stats.cooldown_until:
+            inactive_reason = "cooldown_after_loss"
+
+        # Keep dashboard status fresh while inactive; runtime snapshots are gated below.
+        if inactive_reason:
+            unreal = 0.0
+            unreal_pct = 0.0
+            if paper.btc > 0 and grid and grid.cost_basis_usdt > 0:
+                mkt_value = paper.btc * price
+                unreal = mkt_value - grid.cost_basis_usdt
+                avg_cost = grid.cost_basis_usdt / paper.btc if paper.btc else 0.0
+                unreal_pct = (price / avg_cost - 1.0) if avg_cost else 0.0
+            event_rows = _load_trade_events()
+            entries_count = sum(1 for ev in event_rows if ev.get("event") == "ENTER")
+            exits_count = sum(1 for ev in event_rows if ev.get("event") == "EXIT")
+            has_open_position = paper.btc > 0
+            cum = _read_cum()
+            status_payload = {
+                "tsUtc": _utc_now().isoformat(),
+                "mode": state.get("mode"),
+                "symbol": symbol,
+                "interval": interval,
+                "price": price,
+                "equityUsdt": paper.equity(price),
+                "usdt": paper.usdt,
+                "btc": paper.btc,
+                "position": None if paper.btc <= 0 else {
+                    "entryPrice": (grid.cost_basis_usdt / paper.btc) if (grid and paper.btc > 0) else None,
+                    "qtyBtc": paper.btc,
+                    "stop": float((grid.__dict__.get("trail_stop", 0.0) or 0.0)) if grid else None,
+                    "tp": None,
+                    "entryTimeUtc": grid.last_recenter_utc if grid else None,
+                    "unrealizedPnlUsdt": unreal,
+                    "unrealizedPnlPct": unreal_pct,
+                },
+                "stats": {
+                    "day": stats.day,
+                    "trades": int(cum.get("trades", stats.trades)),
+                    "closedTrades": int(cum.get("trades", stats.trades)),
+                    "entries": entries_count,
+                    "exits": exits_count,
+                    "hasOpenPosition": has_open_position,
+                    "wins": int(cum.get("wins", stats.wins)),
+                    "losses": int(cum.get("losses", stats.losses)),
+                    "pnlUsdt": float(cum.get("realizedPnlUsdt", stats.pnl_usdt)),
+                    "maxDrawdownPct": stats.max_drawdown_pct,
+                    "trendStrength": trend_strength,
+                    "cooldownUntil": stats.cooldown_until.isoformat() if stats.cooldown_until else None,
+                    "grid": {
+                        "mode": state.get("gridMode"),
+                        "spacingPct": grid.spacing_pct if grid else None,
+                        "levels": grid.levels if grid else None,
+                        "openOrders": len(grid.orders) if grid else 0,
+                        "skipped": True,
+                        "skipReason": inactive_reason,
+                    },
+                    "ai": ai_signal,
+                },
+                "lastEvent": "PAUSED" if inactive_reason == "paused" else "COOLDOWN",
+            }
+            _write_status(status_payload)
+            runtime_payload = {
+                "enginePid": os.getpid(),
+                "paper": {
+                    "usdt": paper.usdt,
+                    "btc": paper.btc,
+                },
+                "stats": {
+                    "day": stats.day,
+                    "trades": int(cum.get("trades", stats.trades)),
+                    "closedTrades": int(cum.get("trades", stats.trades)),
+                    "entries": entries_count,
+                    "exits": exits_count,
+                    "hasOpenPosition": has_open_position,
+                    "wins": int(cum.get("wins", stats.wins)),
+                    "losses": int(cum.get("losses", stats.losses)),
+                    "pnl_usdt": float(cum.get("realizedPnlUsdt", stats.pnl_usdt)),
+                    "max_drawdown_pct": stats.max_drawdown_pct,
+                    "peak_equity": stats.peak_equity,
+                    "cooldown_until": stats.cooldown_until.isoformat() if stats.cooldown_until else None,
+                },
+                "market": {
+                    "price": price,
+                    "candle": {
+                        "open": close[-2] if len(close) >= 2 else price,
+                        "high": candle_hi,
+                        "low": candle_lo,
+                        "close": price,
+                        "volumeBase": float(kl[-1][5]) if kl and len(kl[-1]) > 5 else 0.0,
+                        "volumeUsdt": float(kl[-1][7]) if kl and len(kl[-1]) > 7 else 0.0,
+                        "openTimeMs": int(kl[-1][0]) if kl and len(kl[-1]) > 0 else None,
+                        "closeTimeMs": int(kl[-1][6]) if kl and len(kl[-1]) > 6 else None,
+                    },
+                },
+                "grid": _serialize_grid(grid),
+                "ai": ai_signal,
+                "savedAt": _utc_now().isoformat(),
+            }
+            _maybe_write_runtime_state(runtime_snapshot_gate, runtime_payload)
+            time.sleep(1)
+            continue
 
         # Trailing stop (ATR-based): trail up, never down, then exit via stop loss.
         trail_mult = float(state.get("gridTrailAtrMult", 2.0))
@@ -527,14 +1114,20 @@ def main():
                 gross = qty * effective_exit_price
                 fee = gross * fee_rate
                 proceeds = gross - fee
+                gross_realized = gross - grid.cost_basis_usdt
                 realized = proceeds - grid.cost_basis_usdt
 
-                # Guardrail: don't churn out at a net loss just because fees turned a tiny green move into red.
-                # Only allow loss exits when trend strength indicates breakout risk.
+                # Guardrail: avoid exits that look green gross but end red net after fees/slippage.
+                # Only allow a net-loss trail exit when breakout risk is genuinely strong enough to justify an escape.
                 min_profit_pct = float(state.get("gridTrailMinNetProfitPct", 0.0010))  # 0.10%
                 force_exit_trend = float(state.get("gridTrailForceExitTrendStrength", 0.02))
                 want_profit = (avg_cost > 0) and (price >= avg_cost * (1 + min_profit_pct))
-                if (realized < 0) and (trend_strength < force_exit_trend) and (not want_profit):
+                gross_positive_net_negative = (gross_realized > 0.0 and realized < 0.0)
+                strong_escape = trend_strength >= force_exit_trend
+                if gross_positive_net_negative and not strong_escape:
+                    time.sleep(1)
+                    continue
+                if (realized < 0) and (not strong_escape) and (not want_profit):
                     # Ignore the stop for now; let the grid work instead of paying fees repeatedly.
                     time.sleep(1)
                     continue
@@ -548,14 +1141,18 @@ def main():
                 cum = _read_cum()
                 cum["trades"] = int(cum.get("trades", 0)) + 1
                 cum["feesPaidUsdt"] = float(cum.get("feesPaidUsdt", 0.0)) + fee
-                cum["realizedPnlUsdt"] = float(cum.get("realizedPnlUsdt", 0.0)) + realized
+                cum["grossRealizedPnlUsdt"] = float(cum.get("grossRealizedPnlUsdt", 0.0)) + gross_realized
+                stats.trades += 1
                 if realized >= 0:
                     cum["wins"] = int(cum.get("wins", 0)) + 1
+                    stats.wins += 1
                 else:
                     cum["losses"] = int(cum.get("losses", 0)) + 1
+                    stats.losses += 1
                     mins = int(state.get("cooldownMinutesAfterLoss", 20))
                     stats.cooldown_until = now + timedelta(minutes=mins)
                 _write_cum(cum)
+                stats.pnl_usdt = float(cum.get("realizedPnlUsdt", 0.0))
 
                 _log(f"GRID_TRAIL_STOP hit price={price:.2f} stop={trail_stop:.2f} pnl={realized:.2f}")
                 exit_event = {
@@ -571,18 +1168,148 @@ def main():
                     "notionalUsdt": gross,
                     "feeUsdt": fee,
                     "slippageBps": market_slip_bps,
+                    "grossRealizedPnlUsdt": gross_realized,
                     "realizedPnlUsdt": realized,
                     "paper": True,
                 }
+                _attach_ai_event_fields(exit_event, ai_signal)
                 _append_trade(exit_event)
-                baserow_sync.sync_event(state=state, event=exit_event, cumulative_payload=cum)
+
+                event_rows = _load_trade_events()
+                entries_count = sum(1 for ev in event_rows if ev.get("event") == "ENTER")
+                exits_count = sum(1 for ev in event_rows if ev.get("event") == "EXIT")
+                _write_status({
+                    "tsUtc": _utc_now().isoformat(),
+                    "mode": state.get("mode"),
+                    "symbol": symbol,
+                    "interval": interval,
+                    "price": price,
+                    "equityUsdt": paper.equity(price),
+                    "usdt": paper.usdt,
+                    "btc": paper.btc,
+                    "position": None,
+                    "stats": {
+                        "day": stats.day,
+                        "trades": int(cum.get("trades", 0)),
+                        "closedTrades": int(cum.get("trades", 0)),
+                        "entries": entries_count,
+                        "exits": exits_count,
+                        "hasOpenPosition": False,
+                        "wins": int(cum.get("wins", 0)),
+                        "losses": int(cum.get("losses", 0)),
+                        "pnlUsdt": float(cum.get("realizedPnlUsdt", 0.0)),
+                        "maxDrawdownPct": stats.max_drawdown_pct,
+                        "trendStrength": trend_strength,
+                        "grid": {
+                            "mode": state.get("gridMode"),
+                            "spacingPct": grid.spacing_pct if grid else None,
+                            "levels": grid.levels if grid else None,
+                            "openOrders": 0,
+                        },
+                        "ai": ai_signal,
+                    },
+                    "lastEvent": "EXIT",
+                })
+                _write_runtime_state({
+                    "enginePid": os.getpid(),
+                    "paper": {
+                        "usdt": paper.usdt,
+                        "btc": paper.btc,
+                    },
+                    "stats": {
+                        "day": stats.day,
+                        "trades": int(cum.get("trades", 0)),
+                        "closedTrades": int(cum.get("trades", 0)),
+                        "entries": entries_count,
+                        "exits": exits_count,
+                        "hasOpenPosition": False,
+                        "wins": int(cum.get("wins", 0)),
+                        "losses": int(cum.get("losses", 0)),
+                        "pnl_usdt": float(cum.get("realizedPnlUsdt", 0.0)),
+                        "max_drawdown_pct": stats.max_drawdown_pct,
+                        "peak_equity": stats.peak_equity,
+                        "cooldown_until": stats.cooldown_until.isoformat() if stats.cooldown_until else None,
+                    },
+                    "market": {
+                        "price": price,
+                        "candle": {
+                            "open": close[-2] if len(close) >= 2 else price,
+                            "high": candle_hi,
+                            "low": candle_lo,
+                            "close": price,
+                            "volumeBase": float(kl[-1][5]) if kl and len(kl[-1]) > 5 else 0.0,
+                            "volumeUsdt": float(kl[-1][7]) if kl and len(kl[-1]) > 7 else 0.0,
+                            "openTimeMs": int(kl[-1][0]) if kl and len(kl[-1]) > 0 else None,
+                            "closeTimeMs": int(kl[-1][6]) if kl and len(kl[-1]) > 6 else None,
+                        },
+                    },
+                    "grid": _serialize_grid(grid),
+                    "ai": ai_signal,
+                    "savedAt": _utc_now().isoformat(),
+                })
 
                 time.sleep(1)
                 continue
 
+        if ai_live and ai_signal.get("flattenRecommended") and paper.btc > 0 and grid and grid.cost_basis_usdt > 0:
+            min_flatten_conf = max(float(state.get("aiMinConfidence", 0.55) or 0.55), 0.75)
+            if float(ai_signal.get("confidence", 0.0) or 0.0) >= min_flatten_conf:
+                fee_rate = float(state.get("feeBps", 10)) / 10_000.0
+                market_slip_bps = float(state.get("paperMarketSlipBps", 12.0))
+                qty = paper.btc
+                effective_exit_price = price * (1 - (market_slip_bps / 10_000.0))
+                gross = qty * effective_exit_price
+                fee = gross * fee_rate
+                proceeds = gross - fee
+                gross_realized = gross - grid.cost_basis_usdt
+                realized = proceeds - grid.cost_basis_usdt
+
+                paper.btc = 0.0
+                paper.usdt += proceeds
+                grid.cost_basis_usdt = 0.0
+                grid.active = False
+                grid.orders = []
+
+                cum = _read_cum()
+                cum["trades"] = int(cum.get("trades", 0)) + 1
+                cum["feesPaidUsdt"] = float(cum.get("feesPaidUsdt", 0.0)) + fee
+                cum["grossRealizedPnlUsdt"] = float(cum.get("grossRealizedPnlUsdt", 0.0)) + gross_realized
+                stats.trades += 1
+                if realized >= 0:
+                    cum["wins"] = int(cum.get("wins", 0)) + 1
+                    stats.wins += 1
+                else:
+                    cum["losses"] = int(cum.get("losses", 0)) + 1
+                    stats.losses += 1
+                    mins = int(state.get("cooldownMinutesAfterLoss", 20))
+                    stats.cooldown_until = now + timedelta(minutes=mins)
+                _write_cum(cum)
+                stats.pnl_usdt = float(cum.get("realizedPnlUsdt", 0.0))
+
+                exit_event = {
+                    "tsUtc": _utc_now().isoformat(),
+                    "event": "EXIT",
+                    "side": "SELL",
+                    "reason": "AI_FLATTEN",
+                    "type": "PAPER_MARKET",
+                    "symbol": symbol,
+                    "qtyBtc": qty,
+                    "price": effective_exit_price,
+                    "quote": "USDT",
+                    "notionalUsdt": gross,
+                    "feeUsdt": fee,
+                    "slippageBps": market_slip_bps,
+                    "grossRealizedPnlUsdt": gross_realized,
+                    "realizedPnlUsdt": realized,
+                    "paper": True,
+                }
+                _attach_ai_event_fields(exit_event, ai_signal)
+                _append_trade(exit_event)
+                _log(f"AI_FLATTEN decision={ai_signal.get('decisionId')} price={price:.2f} pnl={realized:.2f}")
+
         # Determine mode parameters
         grid_mode = state.get("gridMode", "scalpy")
-        if ai_signal.get("enabled") and not ai_signal.get("stale"):
+        if ai_live:
             if ai_signal.get("recommendedMode") in {"scalpy", "fatty"}:
                 grid_mode = ai_signal.get("recommendedMode")
         if grid_mode == "flexy":
@@ -594,14 +1321,16 @@ def main():
         min_scalpy = float(state.get("gridMinSpacingPctScalpy", 0.006))
         min_fatty = float(state.get("gridMinSpacingPctFatty", 0.010))
         spacing_pct, levels = _spacing_for_mode(grid_mode, atr=atr, price=price, min_scalpy=min_scalpy, min_fatty=min_fatty)
-        if ai_signal.get("enabled") and not ai_signal.get("stale"):
+        if ai_live:
             spacing_pct = _clamp(float(ai_signal.get("recommendedSpacingPct", spacing_pct) or spacing_pct), max(min_scalpy / 2, 0.003), 0.03)
             levels = int(_clamp(float(ai_signal.get("recommendedLevels", levels) or levels), 4, 24))
         max_expo = float(state.get("gridMaxExposurePct", 0.10))
-        if ai_signal.get("enabled") and not ai_signal.get("stale"):
+        if ai_live:
             max_expo = _clamp(float(ai_signal.get("recommendedMaxExposurePct", max_expo) or max_expo), 0.05, 0.60)
+            if ai_signal.get("reduceExposure"):
+                max_expo = min(max_expo, _clamp(float(ai_signal.get("riskBudgetPct", max_expo) or max_expo), 0.0, 0.60))
 
-        if ai_signal.get("enabled") and not ai_signal.get("stale") and not ai_signal.get("gridAllowed", True):
+        if ai_pause_new_buys and (grid is None or not grid.active):
             _write_status({
                 "tsUtc": _utc_now().isoformat(),
                 "mode": state.get("mode"),
@@ -684,6 +1413,7 @@ def main():
                             "skipReason": "spacing_below_fee_floor",
                             "requiredMinSpacingPct": min_edge_spacing,
                         },
+                        "ai": ai_signal,
                     },
                     "lastEvent": "GRID_SKIP",
                 })
@@ -736,13 +1466,11 @@ def main():
                     "slippageBps": market_slip_bps,
                     "paper": True,
                 }
+                _attach_ai_event_fields(enter_event, ai_signal)
                 _append_trade(enter_event)
-                baserow_sync.sync_event(state=state, event=enter_event, cumulative_payload=cum)
                 cum = _read_cum()
-                cum["trades"] = int(cum.get("trades", 0)) + 1
                 cum["feesPaidUsdt"] = float(cum.get("feesPaidUsdt", 0.0)) + init_fee
                 _write_cum(cum)
-                stats.trades += 1
 
             # qty per level: spread remaining reserve across levels
             total_levels = max(1, levels)
@@ -762,8 +1490,8 @@ def main():
                 "anchor": price,
                 "paper": True,
             }
+            _attach_ai_event_fields(grid_init_event, ai_signal)
             _append_trade(grid_init_event)
-            baserow_sync.sync_event(state=state, event=grid_init_event, cumulative_payload=cum)
 
         # Fill logic: if candle crosses order price.
         fee_rate = float(state.get("feeBps", 10)) / 10_000.0
@@ -776,6 +1504,8 @@ def main():
                 continue
 
             if o.side == "BUY":
+                if ai_pause_new_buys:
+                    continue
                 # Must have enough USDT to buy AND pay the fee.
                 est_total = o.qty_btc * o.price * (1 + fee_rate)
                 if est_total <= paper.usdt and o.price <= price:
@@ -804,31 +1534,32 @@ def main():
                 grid.orders.append(o)
                 continue
             ev["symbol"] = symbol
+            _attach_ai_event_fields(ev, ai_signal)
             _append_trade(ev)
-            baserow_sync.sync_event(state=state, event=ev, cumulative_payload=cum)
 
             cum = _read_cum()
-            cum["trades"] = int(cum.get("trades", 0)) + 1
             cum["feesPaidUsdt"] = float(cum.get("feesPaidUsdt", 0.0)) + float(ev.get("feeUsdt") or 0.0)
             if ev.get("event") == "EXIT":
                 pnl = float(ev.get("realizedPnlUsdt") or 0.0)
-                cum["realizedPnlUsdt"] = float(cum.get("realizedPnlUsdt", 0.0)) + pnl
-                stats.pnl_usdt += pnl
+                gross_pnl = float(ev.get("grossRealizedPnlUsdt") or (pnl + float(ev.get("feeUsdt") or 0.0)))
+                cum["trades"] = int(cum.get("trades", 0)) + 1
+                cum["grossRealizedPnlUsdt"] = float(cum.get("grossRealizedPnlUsdt", 0.0)) + gross_pnl
+                stats.trades += 1
                 if pnl >= 0:
                     cum["wins"] = int(cum.get("wins", 0)) + 1
                 else:
                     cum["losses"] = int(cum.get("losses", 0)) + 1
             _write_cum(cum)
-
-            stats.trades += 1
+            stats.pnl_usdt = float(cum.get("realizedPnlUsdt", 0.0))
 
             # place opposite order one level away
             if o.side == "BUY":
                 new_px = o.price * (1 + grid.spacing_pct)
                 grid.orders.append(GridOrder(side="SELL", price=new_px, qty_btc=o.qty_btc))
             else:
-                new_px = o.price * (1 - grid.spacing_pct)
-                grid.orders.append(GridOrder(side="BUY", price=new_px, qty_btc=o.qty_btc))
+                if not (ai_pause_new_buys or ai_sells_only):
+                    new_px = o.price * (1 - grid.spacing_pct)
+                    grid.orders.append(GridOrder(side="BUY", price=new_px, qty_btc=o.qty_btc))
 
         # Update status every tick
         unreal = 0.0
@@ -839,7 +1570,12 @@ def main():
             avg_cost = grid.cost_basis_usdt / paper.btc if paper.btc else 0.0
             unreal_pct = (price / avg_cost - 1.0) if avg_cost else 0.0
 
-        _write_status({
+        event_rows = _load_trade_events()
+        entries_count = sum(1 for ev in event_rows if ev.get("event") == "ENTER")
+        exits_count = sum(1 for ev in event_rows if ev.get("event") == "EXIT")
+        has_open_position = paper.btc > 0
+
+        status_payload = {
             "tsUtc": _utc_now().isoformat(),
             "mode": state.get("mode"),
             "symbol": symbol,
@@ -860,6 +1596,10 @@ def main():
             "stats": {
                 "day": stats.day,
                 "trades": stats.trades,
+                "closedTrades": stats.trades,
+                "entries": entries_count,
+                "exits": exits_count,
+                "hasOpenPosition": has_open_position,
                 "wins": stats.wins,
                 "losses": stats.losses,
                 "pnlUsdt": stats.pnl_usdt,
@@ -874,9 +1614,11 @@ def main():
                 "ai": ai_signal,
             },
             "lastEvent": "TICK",
-        })
+        }
+        _write_status(status_payload)
 
         runtime_payload = {
+            "enginePid": os.getpid(),
             "paper": {
                 "usdt": paper.usdt,
                 "btc": paper.btc,
@@ -884,6 +1626,10 @@ def main():
             "stats": {
                 "day": stats.day,
                 "trades": stats.trades,
+                "closedTrades": stats.trades,
+                "entries": entries_count,
+                "exits": exits_count,
+                "hasOpenPosition": has_open_position,
                 "wins": stats.wins,
                 "losses": stats.losses,
                 "pnl_usdt": stats.pnl_usdt,
@@ -908,17 +1654,12 @@ def main():
             "ai": ai_signal,
             "savedAt": _utc_now().isoformat(),
         }
-        _write_runtime_state(runtime_payload)
-        _log(f"RUNTIME_STATE_WRITE savedAt={runtime_payload['savedAt']} ai_model={((ai_signal or {}).get('model'))} has_ai={('ai' in runtime_payload)}")
-        _fire_and_forget_sync(
-            baserow_sync,
-            state=state,
-            status_payload=_read_json(STATUS_PATH),
-            runtime_payload=runtime_payload,
-            cumulative_payload=_read_cum(),
-        )
+        _maybe_write_runtime_state(runtime_snapshot_gate, runtime_payload)
 
-        _log(f"HEARTBEAT price={price:.2f} equity={paper.equity(price):.4f} orders={len(grid.orders) if grid else 0}")
+        now_monotonic = time.monotonic()
+        if _should_emit_heartbeat_log(last_heartbeat_log_monotonic, HEARTBEAT_LOG_SECONDS, now_monotonic=now_monotonic):
+            _log(f"HEARTBEAT price={price:.2f} equity={paper.equity(price):.4f} orders={len(grid.orders) if grid else 0}")
+            last_heartbeat_log_monotonic = now_monotonic
         time.sleep(1)
 
 

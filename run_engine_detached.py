@@ -42,6 +42,14 @@ def _detached_engine_pids() -> list[int]:
     return [pid for pid in _live_engine_pids() if _pid_ppid(pid) == 1 and _pid_alive(pid)]
 
 
+def _all_engine_pids() -> list[int]:
+    seen = []
+    for pid in _live_engine_pids():
+        if pid not in seen and _pid_alive(pid):
+            seen.append(pid)
+    return seen
+
+
 def _stop_pid(pid: int, timeout: float = 5.0) -> None:
     try:
         os.kill(pid, signal.SIGTERM)
@@ -85,23 +93,20 @@ def _start_fresh_detached() -> int:
 
 
 def start() -> int:
-    detached = _detached_engine_pids()
-    if detached:
-        pid = max(detached)
-        for other in _live_engine_pids():
+    live = _all_engine_pids()
+    if live:
+        pid = max(live)
+        for other in live:
             if other != pid:
                 _stop_pid(other)
         PID_PATH.write_text(str(pid))
         return pid
 
-    # No canonical detached engine exists, so kill everything matching and create one clean worker.
-    for pid in _live_engine_pids():
-        _stop_pid(pid)
     return _start_fresh_detached()
 
 
 def stop() -> None:
-    for pid in _live_engine_pids():
+    for pid in _all_engine_pids():
         _stop_pid(pid)
     if PID_PATH.exists():
         PID_PATH.unlink()
@@ -113,14 +118,9 @@ def restart() -> int:
 
 
 def status() -> int:
-    detached = _detached_engine_pids()
-    if detached:
-        pid = max(detached)
-        for other in _live_engine_pids():
-            if other != pid:
-                _stop_pid(other)
-        PID_PATH.write_text(str(pid))
-        return pid
+    live = _all_engine_pids()
+    if live:
+        return max(live)
     return 0
 
 

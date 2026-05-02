@@ -117,13 +117,10 @@ def restart() -> int:
 def status() -> int:
     port_pid = _listening_pid_on_port()
     if port_pid:
-        PID_PATH.write_text(str(port_pid))
         return port_pid
     live = _live_dashboard_pids()
     if live:
-        newest = max(live)
-        PID_PATH.write_text(str(newest))
-        return newest
+        return max(live)
     return 0
 
 
