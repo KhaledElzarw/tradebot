@@ -1,29 +1,57 @@
 import json
+import hmac
+import base64
+import html as html_lib
+import hashlib
 import os
+import subprocess
+import time
+import threading
 from collections import deque
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
-from math import ceil
 import re
+import xml.etree.ElementTree as ET
 
 from bot import BinanceSpotREST
+from dashboard_contracts import (
+    SCHEMA_VERSION as DASHBOARD_SCHEMA_VERSION,
+    validate_chart_tick_payload,
+    validate_dashboard_payload,
+    validate_market_payload,
+)
+from dashboard_data import DashboardDataAdapter
 from dotenv import load_dotenv
+import requests
+import sqlite_store
 
 BASE_DIR = Path(__file__).resolve().parent
+load_dotenv(BASE_DIR / ".env", override=False)
+
 STATUS_PATH = BASE_DIR / "engine_status.json"
 STATE_PATH = BASE_DIR / "state.json"
 RUNTIME_PATH = BASE_DIR / "runtime_state.json"
 CUM_PATH = BASE_DIR / "cumulative.json"
 TRADES_PATH = BASE_DIR / "trades.jsonl"
 HISTORY_PATH = BASE_DIR / "dashboard_history.json"
+INTELLIGENCE_PATH = BASE_DIR / "dashboard_intelligence.json"
+AI_SIGNAL_PATH = BASE_DIR / "ai_signal.json"
+STATIC_DIR = BASE_DIR / "dashboard" / "static"
 HOST = os.getenv("TRADEBOT_DASHBOARD_HOST", "0.0.0.0")
 PORT = int(os.getenv("TRADEBOT_DASHBOARD_PORT", "8844"))
+DASHBOARD_TOKEN = os.getenv("TRADEBOT_DASHBOARD_TOKEN", "").strip()
+REFRESH_MS = max(1000, int(os.getenv("TRADEBOT_DASHBOARD_REFRESH_MS", "1000")))
+DASHBOARD_REFRESH_MS = max(60_000, int(os.getenv("TRADEBOT_DASHBOARD_HEAVY_REFRESH_MS", str(30 * 60 * 1000))))
+EVENT_SNAPSHOT_LIMIT = max(50, int(os.getenv("TRADEBOT_DASHBOARD_EVENT_SNAPSHOT_LIMIT", "200")))
 
-load_dotenv(BASE_DIR / ".env", override=False)
 _md_clients: dict[str, BinanceSpotREST] = {}
 _ohlcv_cache: dict[tuple[str, str, int, int], list[dict]] = {}
+_ohlcv_cache_at: dict[tuple[str, str, int, int], float] = {}
+_intelligence_lock = threading.Lock()
+_intelligence_refreshing = False
 SUPPORTED_INTERVALS = {
     "1s": {"binance": "1s", "label": "1 Second", "default_limit": 240},
     "1m": {"binance": "1m", "label": "1 Minute", "default_limit": 180},
@@ -35,6 +63,109 @@ SUPPORTED_INTERVALS = {
     "1M": {"binance": "1M", "label": "1 Month", "default_limit": 120},
 }
 MAX_OHLCV_LIMIT = 1000
+INTELLIGENCE_REFRESH_SECONDS = 30 * 60
+NEWS_SOURCES = [
+    ("CoinDesk", "https://www.coindesk.com/arc/outboundfeeds/rss/"),
+    ("Cointelegraph", "https://cointelegraph.com/rss"),
+    ("Decrypt", "https://decrypt.co/feed"),
+    ("The Block", "https://www.theblock.co/rss.xml"),
+]
+AI_ENDPOINTS = [
+    {"key": "local", "label": "Local", "provider": "ollama", "baseUrl": "http://127.0.0.1:11434/v1"},
+    {"key": "battlestation_gpu", "label": "Battlestation GPU", "provider": "ollama", "baseUrl": "http://192.168.1.20:11435/v1"},
+    {"key": "battlestation_cpu", "label": "Battlestation CPU", "provider": "ollama", "baseUrl": "http://192.168.1.20:11436/v1"},
+    {"key": "custom", "label": "Custom", "provider": "ollama", "baseUrl": ""},
+]
+AI_ENDPOINT_BY_KEY = {item["key"]: item for item in AI_ENDPOINTS}
+AI_MODEL_CACHE_SECONDS = 30
+_ai_model_cache: dict[str, tuple[float, list[str]]] = {}
+_sequence_lock = threading.Lock()
+_sequences: dict[str, int] = {"dashboard": 0, "status": 0, "chart": 0}
+SERVER_INSTANCE_ID = f"{int(time.time() * 1000)}-{os.getpid()}"
+DATA_ADAPTER = DashboardDataAdapter()
+AI_RESTART_FIELDS = {
+    "aiBaseUrl",
+    "aiDeepModel",
+    "aiEndpointKey",
+    "aiFallbackModel",
+    "aiModel",
+    "aiProvider",
+    "aiQuickModel",
+}
+EDITABLE_STATE_FIELDS = {
+    "aiBaseUrl": str,
+    "aiDeepModel": str,
+    "aiDryRun": bool,
+    "aiEnabled": bool,
+    "aiEndpointKey": str,
+    "aiFallbackModel": str,
+    "aiMinConfidence": float,
+    "aiModel": str,
+    "aiPollSeconds": float,
+    "aiProvider": str,
+    "aiQuickModel": str,
+    "aiShadowMode": bool,
+    "aiTemperature": float,
+    "aiTimeoutSeconds": float,
+    "allowLiveOrders": bool,
+    "cooldownMinutesAfterLoss": int,
+    "feeBps": int,
+    "gridLevels": int,
+    "gridMaxExposurePct": float,
+    "gridMinPerLevelUsdt": float,
+    "gridMinSpacingPctFatty": float,
+    "gridMinSpacingPctScalpy": float,
+    "gridMode": str,
+    "gridSpacingPct": float,
+    "gridTrailActive": bool,
+    "gridTrailArmAfterAtr": float,
+    "gridTrailArmTrendStrength": float,
+    "gridTrailAtrMult": float,
+    "gridTrailForceExitTrendStrength": float,
+    "gridTrailMinNetProfitPct": float,
+    "gridTrendEscapeStrength": float,
+    "hourlySummary": bool,
+    "interval": str,
+    "maxDailyLossPct": float,
+    "maxTradesPerDay": int,
+    "paperStartBtc": float,
+    "paperStartUsdt": float,
+    "positionCapPct": float,
+    "riskPerTradePct": float,
+    "symbol": str,
+}
+STATE_FIELD_BOUNDS = {
+    "aiMinConfidence": (0.0, 1.0),
+    "aiPollSeconds": (2.0, 3600.0),
+    "aiTemperature": (0.0, 2.0),
+    "aiTimeoutSeconds": (2.0, 3600.0),
+    "cooldownMinutesAfterLoss": (0, 1440),
+    "feeBps": (0, 500),
+    "gridLevels": (1, 100),
+    "gridMaxExposurePct": (0.0, 1.0),
+    "gridMinPerLevelUsdt": (0.0, 1_000_000.0),
+    "gridMinSpacingPctFatty": (0.0, 1.0),
+    "gridMinSpacingPctScalpy": (0.0, 1.0),
+    "gridSpacingPct": (0.0, 1.0),
+    "gridTrailArmAfterAtr": (0.0, 100.0),
+    "gridTrailArmTrendStrength": (0.0, 1.0),
+    "gridTrailAtrMult": (0.0, 100.0),
+    "gridTrailForceExitTrendStrength": (0.0, 1.0),
+    "gridTrailMinNetProfitPct": (0.0, 1.0),
+    "gridTrendEscapeStrength": (0.0, 1.0),
+    "maxDailyLossPct": (0.0, 1.0),
+    "maxTradesPerDay": (0, 10_000),
+    "paperStartBtc": (0.0, 1_000_000.0),
+    "paperStartUsdt": (0.0, 1_000_000_000.0),
+    "positionCapPct": (0.0, 1.0),
+    "riskPerTradePct": (0.0, 1.0),
+}
+STATE_FIELD_CHOICES = {
+    "aiEndpointKey": set(AI_ENDPOINT_BY_KEY.keys()),
+    "gridMode": {"scalpy", "fatty", "flexy"},
+    "interval": set(SUPPORTED_INTERVALS.keys()),
+    "mode": {"paper", "testnet-live"},
+}
 
 HTML = r'''<!doctype html>
 <html lang="en">
@@ -42,170 +173,54 @@ HTML = r'''<!doctype html>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Tradebot Live Dashboard</title>
-  <style>
-    :root {
-      --bg: #0b1020;
-      --panel: rgba(18, 24, 45, 0.92);
-      --panel-2: rgba(30, 38, 68, 0.82);
-      --panel-3: rgba(11, 16, 32, 0.96);
-      --text: #f4f7fb;
-      --muted: #98a2b3;
-      --line: rgba(255,255,255,0.08);
-      --green: #29d391;
-      --red: #ff6b81;
-      --amber: #f7b955;
-      --blue: #5ea6ff;
-      --shadow: 0 18px 50px rgba(0,0,0,.28);
-      --radius: 18px;
-    }
-    body.light {
-      --bg: #eef3fb;
-      --panel: rgba(255, 255, 255, 0.92);
-      --panel-2: rgba(242, 246, 252, 0.96);
-      --panel-3: rgba(248, 250, 254, 0.99);
-      --text: #132033;
-      --muted: #5b6980;
-      --line: rgba(19,32,51,0.08);
-      --shadow: 0 18px 50px rgba(39,68,114,.12);
-    }
-    * { box-sizing: border-box; }
-    html, body { margin:0; min-height:100%; font-family: Inter, system-ui, sans-serif; background: var(--bg); color: var(--text); }
-    .wrap { padding: 14px; }
-    .topbar {
-      display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:14px;
-      position:sticky; top:0; z-index:30; background:linear-gradient(180deg, rgba(11,16,32,.96), rgba(11,16,32,.2)); padding:8px 0;
-      backdrop-filter: blur(10px);
-    }
-    body.light .topbar { background:linear-gradient(180deg, rgba(238,243,251,.96), rgba(238,243,251,.2)); }
-    .title h1 { margin:0; font-size:1.6rem; }
-    .title p { margin:4px 0 0; color:var(--muted); }
-    .pillrow { display:flex; flex-wrap:wrap; gap:8px; }
-    .pill, .btn {
-      background: rgba(255,255,255,.06); border:1px solid rgba(255,255,255,.1); color:var(--text); border-radius:999px;
-      padding:9px 12px; font:inherit;
-    }
-    .btn.playing { border-color: rgba(41,211,145,.45); box-shadow: inset 0 0 0 1px rgba(41,211,145,.18); }
-    .btn.paused { border-color: rgba(247,185,85,.45); box-shadow: inset 0 0 0 1px rgba(247,185,85,.18); }
-    .pager { display:flex; gap:8px; flex-wrap:wrap; align-items:center; justify-content:space-between; }
-    .pager-controls { display:flex; gap:8px; flex-wrap:wrap; }
-    .page-indicator { color:var(--text); background:var(--panel-2); border:1px solid var(--line); padding:8px 12px; border-radius:999px; font-size:.84rem; font-weight:700; }
-    body.light .pill, body.light .btn { background: rgba(255,255,255,.8); border-color: rgba(19,32,51,.12); }
-    .btn { cursor:pointer; border-radius:12px; transition:background .16s ease, border-color .16s ease, box-shadow .16s ease, transform .16s ease; touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
-    .btn:hover { transform:translateY(-1px); }
-    .btn.active-timeframe {
-      background:linear-gradient(180deg, rgba(94,166,255,.24), rgba(94,166,255,.14));
-      border-color:rgba(94,166,255,.48);
-      box-shadow:inset 0 0 0 1px rgba(94,166,255,.18), 0 8px 20px rgba(94,166,255,.12);
-      color:#fff;
-    }
-    body.light .btn.active-timeframe { color:var(--text); }
-    .dashboard {
-      display:grid; grid-template-columns: repeat(24, minmax(0, 1fr)); gap:14px; position:relative;
-      grid-auto-flow:dense;
-      align-items:start;
-    }
-    .card {
-      position:relative; grid-column: span 8; min-height:180px; background:linear-gradient(180deg, var(--panel), rgba(9,14,28,.96));
-      border:1px solid var(--line); border-radius:var(--radius); box-shadow:var(--shadow); padding:14px; overflow:hidden;
-      transition: box-shadow .18s ease, transform .18s ease, border-color .18s ease;
-    }
-    body.light .card { background:linear-gradient(180deg, var(--panel), rgba(240,246,252,.98)); }
-    .card:hover { box-shadow:0 24px 60px rgba(0,0,0,.34); border-color:rgba(94,166,255,.26); }
-    .card.dragging {
-      opacity:.96; transform:scale(1.02); box-shadow:0 28px 70px rgba(0,0,0,.42); z-index:40;
-      pointer-events:none;
-    }
-    .card.drop-target { border-color:rgba(247,185,85,.55); box-shadow:0 0 0 1px rgba(247,185,85,.25), 0 24px 60px rgba(0,0,0,.34); }
-    .card.reflowing { transition: transform .18s ease, box-shadow .18s ease, border-color .18s ease; }
-    .card-head { display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:10px; cursor:move; }
-    .card-actions { display:flex; align-items:center; gap:8px; color:var(--muted); }
-    .card h2 { margin:0; font-size:1rem; }
-    .card-body { display:flex; flex-direction:column; gap:10px; min-height:120px; height:calc(100% - 36px); }
-    .summary { grid-column: span 24; min-height:120px; }
-    .chart-card { grid-column: span 16; min-height:480px; }
-    .events-card, .orders-card { grid-column: span 12; min-height:300px; }
-    .wide { grid-column: span 8; }
-    .sticky-summary { display:grid; grid-template-columns: repeat(6, minmax(0,1fr)); gap:10px; }
-    .metric, .kv { background:var(--panel-2); border:1px solid var(--line); border-radius:14px; padding:12px; }
-    .metric .label, .kv .k { color:var(--muted); font-size:.78rem; text-transform:uppercase; letter-spacing:.08em; }
-    .metric .value { font-size:1.35rem; font-weight:700; margin-top:8px; }
-    .kv .v { margin-top:5px; font-weight:600; }
-    .kv.changed .v, .metric.changed .value { animation: pulse 0.8s ease; }
-    @keyframes pulse { 0% { color: var(--amber); } 100% { color: inherit; } }
-    .kv-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(180px,1fr)); gap:8px; }
-    .positive { color: var(--green); }
-    .negative { color: var(--red); }
-    .chart-wrap { position:relative; flex:1; min-height:260px; border-radius:16px; border:1px solid var(--line); background:linear-gradient(180deg, rgba(9,14,28,.98), rgba(9,14,28,.88)); overflow:hidden; }
-    body.light .chart-wrap { background:linear-gradient(180deg, rgba(248,250,254,.98), rgba(239,244,251,.92)); }
-    .legend { display:flex; flex-wrap:wrap; gap:10px; color:var(--muted); font-size:.82rem; }
-    .legend b { color:var(--text); }
-    canvas { width:100%; height:100%; display:block; }
-    .chart-overlay {
-      position:absolute; top:10px; left:10px; right:10px; display:flex; justify-content:space-between; gap:8px; pointer-events:none; font-size:.82rem;
-    }
-    .overlay-box {
-      background:linear-gradient(180deg, rgba(5,8,18,.82), rgba(5,8,18,.62));
-      border:1px solid rgba(255,255,255,.10);
-      padding:10px 12px;
-      border-radius:12px;
-      box-shadow:0 10px 25px rgba(0,0,0,.22);
-      backdrop-filter: blur(10px);
-    }
-    body.light .overlay-box { background:linear-gradient(180deg, rgba(255,255,255,.94), rgba(250,252,255,.84)); }
-    .overlay-box strong { display:block; font-size:.72rem; letter-spacing:.08em; text-transform:uppercase; color:var(--muted); margin-bottom:4px; }
-    .table-wrap { flex:1; overflow:auto; border-radius:14px; border:1px solid var(--line); background:var(--panel-3); }
-    table { width:100%; border-collapse:collapse; min-width:620px; }
-    th, td { padding:10px 12px; border-bottom:1px solid var(--line); text-align:left; font-size:.88rem; }
-    th { position:sticky; top:0; background:rgba(16,22,41,.98); }
-    body.light th { background:rgba(245,248,252,.98); }
-    .detail-box { white-space:pre-wrap; font-size:.84rem; background:var(--panel-2); border:1px solid var(--line); border-radius:14px; padding:12px; min-height:90px; }
-    .drag-hint { color:var(--muted); font-size:.78rem; }
-    .resize-handle {
-      position:absolute; right:8px; bottom:8px; width:16px; height:16px; border-right:2px solid rgba(255,255,255,.28); border-bottom:2px solid rgba(255,255,255,.28);
-      opacity:.8; cursor:nwse-resize; border-radius:0 0 10px 0;
-    }
-    body.light .resize-handle { border-color:rgba(19,32,51,.28); }
-    .snap-badge {
-      position:absolute; right:14px; top:14px; font-size:.72rem; color:var(--muted); background:rgba(255,255,255,.05); border:1px solid var(--line); padding:4px 8px; border-radius:999px;
-    }
-    @media (max-width: 1200px) {
-      .chart-card, .events-card, .orders-card, .wide { grid-column: span 24; }
-      .sticky-summary { grid-template-columns: repeat(2, minmax(0,1fr)); }
-    }
-    @media (max-width: 720px) {
-      .sticky-summary { grid-template-columns: 1fr; }
-    }
-  </style>
+  <link rel="stylesheet" href="/static/dashboard.v1.css?v=4">
 </head>
 <body>
 <div class="wrap">
+  <div class="boot-error" id="boot-error"></div>
   <div class="topbar">
-    <div class="title">
-      <h1>Tradebot Live Dashboard</h1>
-      <p id="subtitle">Realtime dashboard with live cards, candlesticks, and movable panels</p>
+    <div class="brand">
+      <div class="btc-mark">B</div>
+      <div class="title">
+        <h1>BTC Grid Intelligence</h1>
+        <p><span class="live-dot"></span> <span id="fresh-label">Waiting for data</span></p>
+      </div>
     </div>
     <div class="pillrow">
-      <div class="pill" id="fresh-label">Waiting for data</div>
-      <div class="pill"><span id="pill-symbol">--</span> • <span id="pill-interval">--</span></div>
-      <div class="pill">Server <span id="server-time">--</span></div>
-      <button class="btn" id="bot-toggle-btn" type="button">Pause bot</button>
-      <button class="btn" id="theme-toggle" type="button">Toggle theme</button>
-      <button class="btn" id="refresh-btn" type="button">Refresh</button>
-      <button class="btn" id="zoom-in-btn" type="button">Zoom in</button>
-      <button class="btn" id="zoom-out-btn" type="button">Zoom out</button>
-      <button class="btn" id="reset-layout-btn" type="button">Reset layout</button>
+      <div class="pill">May 1 2026 UTC <span id="server-time">--</span></div>
+      <button class="btn" type="button">BTC/USDT</button>
+      <button class="btn" type="button" id="top-timeframe">1m</button>
+      <button class="icon-btn btn" id="bot-toggle-btn" type="button" title="Pause / play bot">⏸</button>
+      <button class="btn" id="ai-toggle-btn" type="button" title="Pause / resume AI assist">AI On</button>
+      <button class="theme-switch" id="theme-toggle" type="button" title="Toggle theme">
+        <span class="track-icons"><span>L</span><span>D</span></span>
+        <span class="knob"></span>
+      </button>
+      <button class="btn" id="reset-layout-btn" type="button">Reset</button>
     </div>
   </div>
 
   <div class="dashboard" id="dashboard">
     <section class="card summary" id="summary-card" data-default-col="1" data-default-span="24">
-      <div class="card-head"><h2>Top Summary</h2><div class="card-actions"><span class="drag-hint">drag, resize</span></div></div>
-      <div class="snap-badge">24 cols</div><div class="card-body"><div class="sticky-summary" id="sticky-summary"></div></div><div class="resize-handle" aria-hidden="true"></div>
+      <div class="card-body">
+        <div class="command-strip">
+          <div class="trading-state-main">
+            <div class="state-eyebrow">Trading State</div>
+            <div class="state-value" id="trading-state-label">LIVE / AI-GATED</div>
+          </div>
+          <div class="sticky-summary" id="sticky-summary"></div>
+        </div>
+        <div class="control-strip">
+          <div class="mini-control"><span class="mini-icon">M</span><div><div class="label">Mode</div><strong id="state-mode">Grid + Local AI</strong></div></div>
+          <div class="mini-control"><span class="mini-icon">R</span><div><div class="label">Risk</div><strong id="state-risk" class="positive">Normal</strong></div></div>
+          <div class="mini-control"><span class="mini-icon">E</span><div><div class="label">Exposure</div><strong id="state-exposure">--</strong></div></div>
+          <div class="mini-control"><span class="mini-icon">N</span><div><div class="label">Next Action</div><strong id="state-action">Wait</strong></div></div>
+        </div>
+      </div>
     </section>
 
     <section class="card chart-card" id="market-card" data-default-col="1" data-default-span="16">
-      <div class="card-head"><h2>BTC/USDT Candles</h2><div class="card-actions"><span class="drag-hint">hover for OHLCV</span></div></div>
-      <div class="snap-badge">16 cols</div>
+      <div class="card-head"><div class="chart-head-group"><h2>BTC/USD · 1H · INDEX</h2><div class="chart-price-pill" id="chart-price-pill"><span class="label">BTC Price</span><span>--</span></div></div><div class="card-actions"><span class="stream-status" id="chart-stream-status">seed</span><span id="chart-quote-line">--</span></div></div>
       <div class="card-body">
         <div class="legend" id="market-legend"></div>
         <div class="pillrow" id="timeframe-controls" style="margin-bottom:10px"></div>
@@ -216,28 +231,38 @@ HTML = r'''<!doctype html>
             <div class="overlay-box" id="latest-candle"><strong>Live candle</strong><span>--</span></div>
           </div>
         </div>
-      </div><div class="resize-handle" aria-hidden="true"></div>
+      </div>
     </section>
 
-    <section class="card wide" id="allocation-card" data-default-col="17" data-default-span="8">
-      <div class="card-head"><h2>Allocation</h2><div class="card-actions"><span class="drag-hint">drag, resize</span></div></div>
-      <div class="snap-badge">8 cols</div>
+    <section class="card intelligence-card" id="intelligence-card" data-default-col="17" data-default-span="8">
+      <div class="card-head"><h2>News & Macro Intelligence</h2><div class="card-actions"><span class="footer-note">View All</span></div></div>
+      <div class="card-body"><div class="news-stack" id="news-stack"></div></div>
+    </section>
+
+    <section class="card regime-card" id="regime-card" data-default-col="1" data-default-span="16">
+      <div class="card-head"><h2>Market Regime Signals</h2><div class="card-actions"><span class="footer-note" id="regime-updated">live</span></div></div>
       <div class="card-body">
-        <div class="chart-wrap" style="min-height:260px"><canvas id="allocation-chart"></canvas></div>
-        <div class="detail-box" id="allocation-detail"></div>
-      </div><div class="resize-handle" aria-hidden="true"></div>
+        <div class="regime-grid">
+          <div class="signal-table" id="signal-table"></div>
+          <div class="radar-wrap"><div><div class="footer-note">Regime Radar</div><canvas id="regime-radar"></canvas></div></div>
+          <div class="final-regime">
+            <div>
+              <div class="final-icon">~</div>
+              <div class="final-title" id="final-regime-title">Range Consolidation</div>
+              <div class="final-copy" id="final-regime-copy">Choppy price action within established range. Maintain grid discipline and capital efficiency.</div>
+            </div>
+          </div>
+        </div>
+      </div>
     </section>
 
-    <section class="card wide" id="status-card" data-default-col="1" data-default-span="8"><div class="card-head"><h2>Status</h2><div class="card-actions"><span class="drag-hint">drag</span></div></div><div class="snap-badge">8 cols</div><div class="card-body"><div class="kv-grid" id="status-list"></div></div><div class="resize-handle" aria-hidden="true"></div></section>
-    <section class="card wide" id="position-card" data-default-col="9" data-default-span="8"><div class="card-head"><h2>Position</h2><div class="card-actions"><span class="drag-hint">drag</span></div></div><div class="snap-badge">8 cols</div><div class="card-body"><div class="kv-grid" id="position-list"></div></div><div class="resize-handle" aria-hidden="true"></div></section>
-    <section class="card wide" id="grid-card" data-default-col="17" data-default-span="8"><div class="card-head"><h2>Grid</h2><div class="card-actions"><span class="drag-hint">drag</span></div></div><div class="snap-badge">8 cols</div><div class="card-body"><div class="kv-grid" id="grid-list"></div></div><div class="resize-handle" aria-hidden="true"></div></section>
-    <section class="card wide" id="perf-card" data-default-col="1" data-default-span="8"><div class="card-head"><h2>Performance</h2><div class="card-actions"><span class="drag-hint">drag</span></div></div><div class="snap-badge">8 cols</div><div class="card-body"><div class="kv-grid" id="perf-list"></div></div><div class="resize-handle" aria-hidden="true"></div></section>
-    <section class="card wide" id="risk-card" data-default-col="9" data-default-span="8"><div class="card-head"><h2>Risk</h2><div class="card-actions"><span class="drag-hint">drag</span></div></div><div class="snap-badge">8 cols</div><div class="card-body"><div class="kv-grid" id="risk-list"></div></div><div class="resize-handle" aria-hidden="true"></div></section>
-    <section class="card wide" id="config-card" data-default-col="17" data-default-span="8"><div class="card-head"><h2>Config</h2><div class="card-actions"><span class="drag-hint">drag</span></div></div><div class="snap-badge">8 cols</div><div class="card-body"><div class="kv-grid" id="config-list"></div></div><div class="resize-handle" aria-hidden="true"></div></section>
+    <section class="card macro-card" id="macro-card" data-default-col="17" data-default-span="8">
+      <div class="card-head"><h2>Macro Calendar</h2><div class="card-actions"><span class="footer-note">Crypto impact</span></div></div>
+      <div class="card-body"><div class="calendar-list" id="macro-calendar"></div></div>
+    </section>
 
     <section class="card events-card" id="events-card" data-default-col="1" data-default-span="12">
-      <div class="card-head"><h2>Events</h2><div class="card-actions"><span class="drag-hint">drag, resize</span></div></div>
-      <div class="snap-badge">12 cols</div>
+      <div class="card-head"><h2>Events</h2><div class="card-actions"><span class="footer-note">latest fills</span></div></div>
       <div class="card-body">
         <div class="pager">
           <div class="pager-controls">
@@ -249,17 +274,30 @@ HTML = r'''<!doctype html>
           <div class="page-indicator" id="events-page-indicator">Page 1 / 1</div>
         </div>
         <div class="table-wrap"><table><thead><tr><th>Time</th><th>Event</th><th>Price</th><th>Qty</th></tr></thead><tbody id="events-body"></tbody></table></div>
-      </div><div class="resize-handle" aria-hidden="true"></div>
+      </div>
     </section>
 
-    <section class="card orders-card" id="orders-card" data-default-col="13" data-default-span="12">
-      <div class="card-head"><h2>Open Orders</h2><div class="card-actions"><span class="drag-hint">drag, resize</span></div></div>
-      <div class="snap-badge">12 cols</div>
+    <section class="card config-card" id="config-card" data-default-col="13" data-default-span="12">
+      <div class="card-head"><h2>Bot Configuration</h2><div class="card-actions"><span class="drag-hint">editable</span></div></div>
       <div class="card-body">
+        <div class="config-grid" id="config-form-grid"></div>
+        <div class="config-actions">
+          <button class="btn" id="config-save-btn" type="button">Save configuration</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="card orders-card" id="orders-card" data-default-col="1" data-default-span="24">
+      <div class="card-head"><h2>Orders</h2><div class="card-actions"><span class="footer-note">open grid and trade history</span></div></div>
+      <div class="card-body">
+        <div class="tabbar">
+          <button class="btn active-filter" id="orders-tab-open-btn" type="button">Open Orders</button>
+          <button class="btn" id="orders-tab-history-btn" type="button">Trade History</button>
+        </div>
         <div class="pager">
           <div class="pager-controls">
-            <button class="btn" id="orders-filter-buy-btn" type="button">Buy only</button>
-            <button class="btn" id="orders-filter-sell-btn" type="button">Sell only</button>
+            <button class="btn buy-filter" id="orders-filter-buy-btn" type="button">Buy</button>
+            <button class="btn sell-filter" id="orders-filter-sell-btn" type="button">Sell</button>
             <button class="btn" id="orders-first-btn" type="button">First</button>
             <button class="btn" id="orders-prev-btn" type="button">Prev</button>
             <button class="btn" id="orders-next-btn" type="button">Next</button>
@@ -267,746 +305,304 @@ HTML = r'''<!doctype html>
           </div>
           <div class="page-indicator" id="orders-page-indicator">Page 1 / 1</div>
         </div>
-        <div class="table-wrap"><table><thead><tr><th>Side</th><th>Price</th><th>Amount</th><th>Total</th></tr></thead><tbody id="orders-body"></tbody></table></div>
-      </div><div class="resize-handle" aria-hidden="true"></div>
+        <div class="table-wrap"><table><thead><tr><th>Side</th><th>Price</th><th>Vs Market</th><th>Amount</th><th>Total</th><th>Type</th></tr></thead><tbody id="orders-body"></tbody></table></div>
+      </div>
+    </section>
+
+    <section class="card status-footer" id="status-card" data-default-col="1" data-default-span="24">
+      <div class="card-head"><h2>Status Footer</h2><div class="card-actions"><span class="footer-note">runtime and bot state</span></div></div>
+      <div class="card-body"><div class="kv-grid" id="status-list"></div></div>
     </section>
   </div>
 </div>
-<script>
-const GRID_COLS = 24;
-const GRID_GAP = 14;
-const MIN_SPAN = 6;
-const TIMEFRAMES = ['1s', '1m', '5m', '30m', '1h', '1d', '1w', '1M'];
-const DEFAULT_LIMITS = { '1s': 240, '1m': 180, '5m': 180, '30m': 180, '1h': 240, '1d': 180, '1w': 120, '1M': 120 };
-const stateUi = {
-  theme: localStorage.getItem('tradebot-theme') || 'dark',
-  selectedEventIndex: 0,
-  selectedOrderIndex: 0,
-  lastSnapshot: {},
-  lastEvents: [],
-  eventPage: -1,
-  eventPageSize: 5,
-  lastOrders: [],
-  orderPage: -1,
-  orderPageSize: 5,
-  orderFilter: 'all',
-  lastOhlcv: [],
-  drag: null,
-  timeframe: localStorage.getItem('tradebot-chart-timeframe') || '1m',
-  candleLimit: Number(localStorage.getItem('tradebot-chart-limit') || 180),
-  historyOffset: Number(localStorage.getItem('tradebot-chart-history-offset') || 0),
-  panOffset: Number(localStorage.getItem('tradebot-chart-pan-offset') || 0),
-  visibleOhlcv: [],
-};
-
-function setTheme(theme) {
-  document.body.classList.toggle('light', theme === 'light');
-  stateUi.theme = theme;
-  localStorage.setItem('tradebot-theme', theme);
-}
-setTheme(stateUi.theme);
-document.getElementById('theme-toggle').addEventListener('click', () => setTheme(stateUi.theme === 'dark' ? 'light' : 'dark'));
-document.getElementById('refresh-btn').addEventListener('click', refresh);
-document.getElementById('bot-toggle-btn').addEventListener('click', toggleBotPause);
-document.getElementById('events-first-btn').addEventListener('click', () => changeEventPage('first'));
-document.getElementById('events-prev-btn').addEventListener('click', () => changeEventPage('prev'));
-document.getElementById('events-next-btn').addEventListener('click', () => changeEventPage('next'));
-document.getElementById('events-last-btn').addEventListener('click', () => changeEventPage('last'));
-document.getElementById('orders-filter-buy-btn').addEventListener('click', () => setOrderFilter('BUY'));
-document.getElementById('orders-filter-sell-btn').addEventListener('click', () => setOrderFilter('SELL'));
-document.getElementById('orders-first-btn').addEventListener('click', () => changeOrderPage('first'));
-document.getElementById('orders-prev-btn').addEventListener('click', () => changeOrderPage('prev'));
-document.getElementById('orders-next-btn').addEventListener('click', () => changeOrderPage('next'));
-document.getElementById('orders-last-btn').addEventListener('click', () => changeOrderPage('last'));
-document.getElementById('zoom-in-btn').addEventListener('click', () => adjustZoom(-1));
-document.getElementById('zoom-out-btn').addEventListener('click', () => adjustZoom(1));
-document.getElementById('reset-layout-btn').addEventListener('click', () => { localStorage.removeItem(getLayoutKey()); applyDefaultLayout(); saveLayout(); });
-
-function fmtNum(v, digits = 2) { if (v === null || v === undefined || Number.isNaN(Number(v))) return '--'; return Number(v).toLocaleString(undefined, { maximumFractionDigits: digits, minimumFractionDigits: digits }); }
-function fmtMoney(v) { return v === null || v === undefined ? '--' : `$${fmtNum(v, 2)}`; }
-function fmtPct(v) { return v === null || v === undefined ? '--' : `${(Number(v) * 100).toFixed(2)}%`; }
-function fmtPrice(v) { return v === null || v === undefined ? '--' : fmtNum(v, 2); }
-function fmtDate(v) { if (!v) return '--'; try { return new Date(v).toLocaleString(); } catch { return v; } }
-function signedClass(v) { return Number(v) > 0 ? 'positive' : Number(v) < 0 ? 'negative' : ''; }
-function humanAge(seconds) { if (seconds == null) return '--'; if (seconds < 60) return `${seconds.toFixed(2)}s`; if (seconds < 3600) return `${(seconds/60).toFixed(1)}m`; return `${(seconds/3600).toFixed(1)}h`; }
-
-function buildKvHtml(label, value, extraClass='', changed=false) {
-  return `<div class="kv ${changed ? 'changed' : ''}"><div class="k">${label}</div><div class="v ${extraClass}">${value}</div></div>`;
-}
-
-function renderKVs(targetId, rows) {
-  const target = document.getElementById(targetId);
-  target.innerHTML = rows.map(([k, v, extraClass, changed]) => buildKvHtml(k, v, extraClass, changed)).join('');
-}
-
-function normalizeTimeframe(tf) {
-  return TIMEFRAMES.includes(tf) ? tf : '1m';
-}
-
-function setTimeframe(tf) {
-  stateUi.timeframe = normalizeTimeframe(tf);
-  stateUi.panOffset = 0;
-  stateUi.historyOffset = 0;
-  if (!stateUi.candleLimit || stateUi.candleLimit < 30) {
-    stateUi.candleLimit = DEFAULT_LIMITS[stateUi.timeframe] || 180;
-  }
-  localStorage.setItem('tradebot-chart-timeframe', stateUi.timeframe);
-  localStorage.setItem('tradebot-chart-pan-offset', '0');
-  localStorage.setItem('tradebot-chart-history-offset', '0');
-  renderTimeframeControls();
-  refresh();
-}
-
-function adjustZoom(direction) {
-  const current = Number(stateUi.candleLimit || DEFAULT_LIMITS[stateUi.timeframe] || 180);
-  const next = direction > 0 ? Math.min(1000, Math.round(current * 1.5)) : Math.max(30, Math.round(current / 1.5));
-  stateUi.candleLimit = next;
-  stateUi.panOffset = 0;
-  stateUi.historyOffset = 0;
-  localStorage.setItem('tradebot-chart-limit', String(next));
-  localStorage.setItem('tradebot-chart-pan-offset', '0');
-  localStorage.setItem('tradebot-chart-history-offset', '0');
-  refresh();
-}
-
-function panChart(delta) {
-  const limit = Math.max(30, Number(stateUi.candleLimit || 180));
-  const maxLocalOffset = Math.max(0, (stateUi.lastOhlcv || []).length - limit);
-  const nextOffset = stateUi.panOffset + delta;
-  if (nextOffset < 0) {
-    stateUi.panOffset = 0;
-    stateUi.historyOffset = Math.max(0, stateUi.historyOffset + nextOffset);
-  } else if (nextOffset > maxLocalOffset) {
-    stateUi.panOffset = 0;
-    stateUi.historyOffset += Math.max(1, nextOffset - maxLocalOffset);
-    refresh();
-    return;
-  } else {
-    stateUi.panOffset = nextOffset;
-  }
-  localStorage.setItem('tradebot-chart-pan-offset', String(stateUi.panOffset));
-  localStorage.setItem('tradebot-chart-history-offset', String(stateUi.historyOffset));
-  drawCandles(stateUi.lastOhlcv || []);
-}
-
-function renderTimeframeControls() {
-  const el = document.getElementById('timeframe-controls');
-  el.innerHTML = TIMEFRAMES.map(tf => `<button class="btn ${stateUi.timeframe === tf ? 'active-timeframe' : ''}" type="button" data-tf="${tf}">${tf}</button>`).join('');
-  el.querySelectorAll('[data-tf]').forEach(btn => btn.addEventListener('click', () => setTimeframe(btn.dataset.tf)));
-}
-
-function getChanged(path, value) {
-  const old = stateUi.lastSnapshot[path];
-  stateUi.lastSnapshot[path] = value;
-  return old !== undefined && old !== value;
-}
-
-function renderStickySummary(status, cumulative, grid) {
-  const target = document.getElementById('sticky-summary');
-  const items = [
-    ['Price', fmtPrice(status.price), getChanged('summary.price', status.price)],
-    ['Equity', fmtMoney(status.equityUsdt), getChanged('summary.equity', status.equityUsdt)],
-    ['USDT', fmtMoney(status.usdt), getChanged('summary.usdt', status.usdt)],
-    ['BTC', fmtNum(status.btc, 6), getChanged('summary.btc', status.btc)],
-    ['Open Orders', grid.openOrders ?? '--', getChanged('summary.orders', grid.openOrders)],
-    ['Trades', cumulative.trades ?? '--', getChanged('summary.trades', cumulative.trades)]
-  ];
-  target.innerHTML = items.map(([label, value, changed]) => `<div class="metric ${changed ? 'changed' : ''}"><div class="label">${label}</div><div class="value">${value}</div></div>`).join('');
-}
-
-async function toggleBotPause() {
-  const btn = document.getElementById('bot-toggle-btn');
-  btn.disabled = true;
-  try {
-    const shouldPause = !(stateUi.lastState && stateUi.lastState.paused);
-    const res = await fetch('/api/control', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ paused: shouldPause }),
-    });
-    if (!res.ok) throw new Error(`control failed: ${res.status}`);
-    await refresh();
-  } catch (err) {
-    console.error(err);
-  } finally {
-    btn.disabled = false;
-  }
-}
-
-function changeEventPage(direction) {
-  const events = stateUi.lastEvents || [];
-  const totalPages = Math.max(1, Math.ceil(events.length / stateUi.eventPageSize));
-  if (stateUi.eventPage < 0) stateUi.eventPage = totalPages - 1;
-  if (direction === 'first') stateUi.eventPage = 0;
-  if (direction === 'last') stateUi.eventPage = totalPages - 1;
-  if (direction === 'prev') stateUi.eventPage = Math.max(0, stateUi.eventPage - 1);
-  if (direction === 'next') stateUi.eventPage = Math.min(totalPages - 1, stateUi.eventPage + 1);
-  renderEvents(events);
-}
-
-function renderEvents(events) {
-  const ordered = (events || []).slice().reverse();
-  stateUi.lastEvents = ordered;
-  const totalPages = Math.max(1, Math.ceil(ordered.length / stateUi.eventPageSize));
-  if (stateUi.eventPage < 0 || stateUi.eventPage >= totalPages) stateUi.eventPage = totalPages - 1;
-  const start = stateUi.eventPage * stateUi.eventPageSize;
-  const pageRows = ordered.slice(start, start + stateUi.eventPageSize);
-  const body = document.getElementById('events-body');
-  body.innerHTML = '';
-  pageRows.forEach((ev) => {
-    const tr = document.createElement('tr');
-    tr.innerHTML = `<td>${fmtDate(ev.tsUtc)}</td><td>${ev.event || '--'}</td><td>${fmtPrice(ev.price)}</td><td>${fmtNum(ev.qtyBtc, 6)}</td>`;
-    body.appendChild(tr);
-  });
-  document.getElementById('events-page-indicator').textContent = `Page ${stateUi.eventPage + 1} / ${totalPages}`;
-  document.getElementById('events-first-btn').disabled = stateUi.eventPage <= 0;
-  document.getElementById('events-prev-btn').disabled = stateUi.eventPage <= 0;
-  document.getElementById('events-next-btn').disabled = stateUi.eventPage >= totalPages - 1;
-  document.getElementById('events-last-btn').disabled = stateUi.eventPage >= totalPages - 1;
-}
-
-function setOrderFilter(side) {
-  const normalized = side === 'BUY' || side === 'SELL' ? side : 'all';
-  stateUi.orderFilter = stateUi.orderFilter === normalized ? 'all' : normalized;
-  stateUi.orderPage = -1;
-  renderOrders(stateUi.lastOrders || [], stateUi.lastOrderGrid || {});
-}
-
-function getFilteredOrders(orders) {
-  if (stateUi.orderFilter === 'BUY') return (orders || []).filter(order => order.side === 'BUY');
-  if (stateUi.orderFilter === 'SELL') return (orders || []).filter(order => order.side === 'SELL');
-  return (orders || []).slice();
-}
-
-function changeOrderPage(direction) {
-  const orders = getFilteredOrders(stateUi.lastOrders || []);
-  const totalPages = Math.max(1, Math.ceil(orders.length / stateUi.orderPageSize));
-  if (stateUi.orderPage < 0) stateUi.orderPage = totalPages - 1;
-  if (direction === 'first') stateUi.orderPage = 0;
-  if (direction === 'last') stateUi.orderPage = totalPages - 1;
-  if (direction === 'prev') stateUi.orderPage = Math.max(0, stateUi.orderPage - 1);
-  if (direction === 'next') stateUi.orderPage = Math.min(totalPages - 1, stateUi.orderPage + 1);
-  renderOrders(stateUi.lastOrders || [], stateUi.lastOrderGrid || {});
-}
-
-function renderOrders(orders, grid) {
-  const ordered = (orders || []).slice();
-  stateUi.lastOrders = ordered;
-  stateUi.lastOrderGrid = grid || {};
-  const filtered = getFilteredOrders(ordered);
-  const totalPages = Math.max(1, Math.ceil(filtered.length / stateUi.orderPageSize));
-  if (stateUi.orderPage < 0 || stateUi.orderPage >= totalPages) stateUi.orderPage = totalPages - 1;
-  const start = stateUi.orderPage * stateUi.orderPageSize;
-  const pageRows = filtered.slice(start, start + stateUi.orderPageSize);
-  const body = document.getElementById('orders-body');
-  body.innerHTML = '';
-  pageRows.forEach((order) => {
-    const total = Number(order.qty_btc || 0) * Number(order.price || 0);
-    const tr = document.createElement('tr');
-    tr.innerHTML = `<td>${order.side || '--'}</td><td>${fmtPrice(order.price)}</td><td>${fmtNum(order.qty_btc, 6)}</td><td>${fmtMoney(total)}</td>`;
-    body.appendChild(tr);
-  });
-  document.getElementById('orders-page-indicator').textContent = `Page ${stateUi.orderPage + 1} / ${totalPages}`;
-  document.getElementById('orders-first-btn').disabled = stateUi.orderPage <= 0;
-  document.getElementById('orders-prev-btn').disabled = stateUi.orderPage <= 0;
-  document.getElementById('orders-next-btn').disabled = stateUi.orderPage >= totalPages - 1;
-  document.getElementById('orders-last-btn').disabled = stateUi.orderPage >= totalPages - 1;
-  document.getElementById('orders-filter-buy-btn').classList.toggle('active-timeframe', stateUi.orderFilter === 'BUY');
-  document.getElementById('orders-filter-sell-btn').classList.toggle('active-timeframe', stateUi.orderFilter === 'SELL');
-}
-
-function drawAllocation(usdt, btcValue, total) {
-  const canvas = document.getElementById('allocation-chart');
-  const ctx = canvas.getContext('2d');
-  const rect = canvas.getBoundingClientRect();
-  canvas.width = rect.width * devicePixelRatio;
-  canvas.height = rect.height * devicePixelRatio;
-  ctx.scale(devicePixelRatio, devicePixelRatio);
-  ctx.clearRect(0, 0, rect.width, rect.height);
-  const cx = rect.width / 2, cy = rect.height / 2, r = Math.min(rect.width, rect.height) * 0.34;
-  const frac = total > 0 ? usdt / total : 0;
-  ctx.lineWidth = 26;
-  ctx.strokeStyle = '#29d391';
-  ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.stroke();
-  ctx.strokeStyle = '#5ea6ff';
-  ctx.beginPath(); ctx.arc(cx, cy, r, -Math.PI/2, -Math.PI/2 + Math.PI * 2 * frac); ctx.stroke();
-  ctx.fillStyle = getComputedStyle(document.body).getPropertyValue('--text');
-  ctx.font = '600 16px Inter, sans-serif';
-  ctx.textAlign = 'center';
-  ctx.fillText('Allocation', cx, cy - 8);
-  ctx.font = '700 20px Inter, sans-serif';
-  ctx.fillText(fmtMoney(total), cx, cy + 18);
-  document.getElementById('allocation-detail').textContent = `USDT cash: ${fmtMoney(usdt)}\nBTC exposure: ${fmtMoney(btcValue)}\nTotal equity: ${fmtMoney(total)}`;
-}
-
-function getVisibleOhlcv(allOhlcv) {
-  const rows = allOhlcv || [];
-  const limit = Math.max(30, Number(stateUi.candleLimit || DEFAULT_LIMITS[stateUi.timeframe] || 180));
-  const maxOffset = Math.max(0, rows.length - limit);
-  stateUi.panOffset = Math.max(0, Math.min(maxOffset, Number(stateUi.panOffset || 0)));
-  const end = rows.length - stateUi.panOffset;
-  const start = Math.max(0, end - limit);
-  const visible = rows.slice(start, end);
-  stateUi.visibleOhlcv = visible;
-  return visible;
-}
-
-function drawCandles(ohlcv) {
-  const allRows = (ohlcv || []).map(row => ({ ...row }));
-  const livePrice = Number((stateUi.lastStatus || {}).price);
-  if (allRows.length && Number.isFinite(livePrice)) {
-    const last = allRows[allRows.length - 1];
-    last.close = livePrice;
-    last.high = Math.max(Number(last.high || livePrice), livePrice);
-    last.low = Math.min(Number(last.low || livePrice), livePrice);
-  }
-  const visibleRows = getVisibleOhlcv(allRows);
-  const canvas = document.getElementById('market-chart');
-  const ctx = canvas.getContext('2d');
-  const rect = canvas.getBoundingClientRect();
-  canvas.width = rect.width * devicePixelRatio;
-  canvas.height = rect.height * devicePixelRatio;
-  ctx.scale(devicePixelRatio, devicePixelRatio);
-  ctx.clearRect(0, 0, rect.width, rect.height);
-  if (!visibleRows.length) return;
-
-  const priceArea = rect.height * 0.76;
-  const volumeTop = priceArea + 10;
-  const padL = 60, padR = 20, padT = 16, padB = 24;
-  const highs = visibleRows.map(c => c.high);
-  const lows = visibleRows.map(c => c.low);
-  const vols = visibleRows.map(c => c.volumeUsdt);
-  const maxP = Math.max(...highs), minP = Math.min(...lows), spanP = Math.max(1e-9, maxP - minP);
-  const maxV = Math.max(...vols, 1);
-  const chartW = rect.width - padL - padR;
-  const candleGap = chartW / Math.max(visibleRows.length, 1);
-  const candleW = Math.max(5, candleGap * 0.62);
-
-  const bgGrad = ctx.createLinearGradient(0, 0, 0, priceArea);
-  bgGrad.addColorStop(0, 'rgba(94,166,255,0.08)');
-  bgGrad.addColorStop(1, 'rgba(94,166,255,0.01)');
-  ctx.fillStyle = bgGrad;
-  ctx.fillRect(padL, padT, chartW, priceArea - padT - padB);
-
-  ctx.strokeStyle = 'rgba(255,255,255,.06)';
-  ctx.lineWidth = 1;
-  for (let i = 0; i < 6; i++) {
-    const y = padT + ((priceArea - padT - padB) * i / 5);
-    ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(rect.width - padR, y); ctx.stroke();
-    const price = maxP - ((maxP - minP) * i / 5);
-    ctx.fillStyle = getComputedStyle(document.body).getPropertyValue('--muted');
-    ctx.font = '12px Inter';
-    ctx.fillText(fmtPrice(price), 8, y + 4);
-  }
-  for (let i = 0; i <= visibleRows.length; i += Math.max(1, Math.floor(visibleRows.length / 6))) {
-    const x = padL + candleGap * i;
-    ctx.beginPath(); ctx.moveTo(x, padT); ctx.lineTo(x, priceArea - padB); ctx.stroke();
-  }
-
-  const hoverState = canvas.__hoverIndex;
-  visibleRows.forEach((c, i) => {
-    const x = padL + candleGap * (i + 0.5);
-    const yHigh = padT + (maxP - c.high) / spanP * (priceArea - padT - padB);
-    const yLow = padT + (maxP - c.low) / spanP * (priceArea - padT - padB);
-    const yOpen = padT + (maxP - c.open) / spanP * (priceArea - padT - padB);
-    const yClose = padT + (maxP - c.close) / spanP * (priceArea - padT - padB);
-    const up = c.close >= c.open;
-    const color = up ? '#22c55e' : '#f43f5e';
-    const wick = up ? 'rgba(34,197,94,.95)' : 'rgba(244,63,94,.95)';
-    ctx.strokeStyle = wick;
-    ctx.lineWidth = 1;
-    ctx.beginPath(); ctx.moveTo(x, yHigh); ctx.lineTo(x, yLow); ctx.stroke();
-    const top = Math.min(yOpen, yClose), body = Math.max(2, Math.abs(yClose - yOpen));
-    const grad = ctx.createLinearGradient(0, top, 0, top + body);
-    grad.addColorStop(0, up ? 'rgba(52,211,153,.98)' : 'rgba(251,113,133,.98)');
-    grad.addColorStop(1, up ? 'rgba(22,163,74,.98)' : 'rgba(225,29,72,.98)');
-    ctx.fillStyle = grad;
-    ctx.fillRect(x - candleW / 2, top, candleW, body);
-    ctx.strokeStyle = up ? 'rgba(167,243,208,.34)' : 'rgba(254,205,211,.34)';
-    ctx.strokeRect(x - candleW / 2, top, candleW, body);
-    const volH = (c.volumeUsdt / maxV) * (rect.height - volumeTop - 18);
-    ctx.globalAlpha = 0.25;
-    ctx.fillStyle = color;
-    ctx.fillRect(x - candleW / 2, rect.height - volH - 8, candleW, volH);
-    ctx.globalAlpha = 1;
-    if (hoverState === i) {
-      ctx.strokeStyle = '#f7b955';
-      ctx.lineWidth = 1.2;
-      ctx.strokeRect(x - candleW / 2 - 2, top - 2, candleW + 4, body + 4);
-      ctx.beginPath(); ctx.moveTo(x, padT); ctx.lineTo(x, rect.height - 8); ctx.stroke();
-      ctx.beginPath(); ctx.moveTo(padL, yClose); ctx.lineTo(rect.width - padR, yClose); ctx.stroke();
-      ctx.lineWidth = 1;
-    }
-  });
-
-  const latest = visibleRows[visibleRows.length - 1];
-  const displayClose = Number.isFinite(livePrice) ? livePrice : latest.close;
-  const liveTag = Number.isFinite(livePrice) ? ' • live' : '';
-  document.getElementById('latest-candle').innerHTML = `<strong>Live candle</strong><span>O ${fmtPrice(latest.open)}  H ${fmtPrice(latest.high)}  L ${fmtPrice(latest.low)}  C ${fmtPrice(displayClose)}${liveTag}  Vol ${fmtMoney(latest.volumeUsdt)}</span>`;
-  document.getElementById('market-legend').innerHTML = `<span><b>${latest.symbol || 'BTC/USDT'}</b></span><span>Open ${fmtPrice(latest.open)}</span><span>High ${fmtPrice(latest.high)}</span><span>Low ${fmtPrice(latest.low)}</span><span>Close ${fmtPrice(displayClose)}${liveTag}</span><span>Volume ${fmtMoney(latest.volumeUsdt)}</span>`;
-
-  canvas.onmousemove = (ev) => {
-    const r = canvas.getBoundingClientRect();
-    const x = ev.clientX - r.left;
-    const idx = Math.max(0, Math.min(visibleRows.length - 1, Math.floor((x - padL) / Math.max(1, candleGap))));
-    canvas.__hoverIndex = idx;
-    const c = visibleRows[idx];
-    document.getElementById('hover-ohlcv').innerHTML = `<strong>Cursor</strong><span>${new Date(c.openTimeMs).toLocaleString()}  O ${fmtPrice(c.open)}  H ${fmtPrice(c.high)}  L ${fmtPrice(c.low)}  C ${fmtPrice(c.close)}  Vol ${fmtMoney(c.volumeUsdt)}</span>`;
-    drawCandles(allRows);
-  };
-  canvas.onmouseleave = () => {
-    canvas.__hoverIndex = null;
-    document.getElementById('hover-ohlcv').innerHTML = '<strong>Cursor</strong><span>Move over a candle</span>';
-    drawCandles(allRows);
-  };
-  canvas.onwheel = (ev) => {
-    ev.preventDefault();
-    adjustZoom(ev.deltaY > 0 ? 1 : -1);
-  };
-  let panStartX = null;
-  canvas.onmousedown = (ev) => { panStartX = ev.clientX; };
-  canvas.onmouseup = () => { panStartX = null; };
-  canvas.onmouseleave = () => {
-    if (panStartX !== null) panStartX = null;
-    canvas.__hoverIndex = null;
-    document.getElementById('hover-ohlcv').innerHTML = '<strong>Cursor</strong><span>Move over a candle</span>';
-    drawCandles(allRows);
-  };
-  canvas.onmousemove = (ev) => {
-    if (panStartX !== null && Math.abs(ev.clientX - panStartX) > 8) {
-      const step = Math.round((panStartX - ev.clientX) / Math.max(8, candleGap));
-      if (step !== 0) {
-        panStartX = ev.clientX;
-        panChart(step);
-        return;
-      }
-    }
-    const r = canvas.getBoundingClientRect();
-    const x = ev.clientX - r.left;
-    const idx = Math.max(0, Math.min(visibleRows.length - 1, Math.floor((x - padL) / Math.max(1, candleGap))));
-    canvas.__hoverIndex = idx;
-    const c = visibleRows[idx];
-    document.getElementById('hover-ohlcv').innerHTML = `<strong>Cursor</strong><span>${new Date(c.openTimeMs).toLocaleString()}  O ${fmtPrice(c.open)}  H ${fmtPrice(c.high)}  L ${fmtPrice(c.low)}  C ${fmtPrice(c.close)}  Vol ${fmtMoney(c.volumeUsdt)}</span>`;
-    drawCandles(allRows);
-  };
-}
-
-function getLayoutKey() { return 'tradebot-layout-v3'; }
-
-function updateSnapBadge(card) {
-  const badge = card.querySelector('.snap-badge');
-  if (!badge) return;
-  badge.textContent = `${card.dataset.span || card.dataset.defaultSpan || 8} cols`;
-}
-
-function saveLayout() {
-  const cards = [...document.querySelectorAll('.card')].map(card => ({
-    id: card.id,
-    order: [...card.parentElement.children].indexOf(card),
-    span: card.dataset.span || card.dataset.defaultSpan || '8',
-  }));
-  localStorage.setItem(getLayoutKey(), JSON.stringify(cards));
-}
-
-function applyCardSpan(card, span) {
-  const nextSpan = Math.max(MIN_SPAN, Math.min(GRID_COLS, Number(span) || Number(card.dataset.defaultSpan || 8)));
-  card.dataset.span = String(nextSpan);
-  card.style.gridColumn = `span ${nextSpan}`;
-  updateSnapBadge(card);
-}
-
-function applyDefaultLayout() {
-  localStorage.removeItem(getLayoutKey());
-  const dashboard = document.getElementById('dashboard');
-  [...document.querySelectorAll('.card')].sort((a, b) => Number(a.dataset.defaultCol || 1) - Number(b.dataset.defaultCol || 1)).forEach(card => {
-    dashboard.appendChild(card);
-    applyCardSpan(card, card.dataset.defaultSpan || 8);
-  });
-}
-
-function loadLayout() {
-  const raw = localStorage.getItem(getLayoutKey());
-  if (!raw) {
-    applyDefaultLayout();
-    return;
-  }
-  try {
-    const cards = JSON.parse(raw);
-    const dashboard = document.getElementById('dashboard');
-    cards.sort((a, b) => a.order - b.order).forEach(cfg => {
-      const card = document.getElementById(cfg.id);
-      if (!card) return;
-      dashboard.appendChild(card);
-      applyCardSpan(card, cfg.span || card.dataset.defaultSpan || 8);
-    });
-    [...document.querySelectorAll('.card')].forEach(card => { if (!card.dataset.span) applyCardSpan(card, card.dataset.defaultSpan || 8); });
-  } catch {
-    applyDefaultLayout();
-  }
-}
-
-function pointerClientXY(ev) {
-  const p = ev.touches?.[0] || ev.changedTouches?.[0] || ev;
-  return { x: p.clientX, y: p.clientY };
-}
-
-function midpointOfCard(card) {
-  const rect = card.getBoundingClientRect();
-  return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
-}
-
-function findReorderTarget(cards, dragCard, x, y) {
-  let best = null;
-  let bestDistance = Infinity;
-  cards.forEach(card => {
-    if (card === dragCard) return;
-    const mid = midpointOfCard(card);
-    const dx = mid.x - x;
-    const dy = mid.y - y;
-    const dist = Math.hypot(dx, dy);
-    if (dist < bestDistance) {
-      best = card;
-      bestDistance = dist;
-    }
-  });
-  return best;
-}
-
-function reorderCardBefore(dashboard, dragCard, targetCard, pointerX) {
-  if (!targetCard || targetCard === dragCard) return false;
-  const rect = targetCard.getBoundingClientRect();
-  const insertAfter = pointerX > rect.left + rect.width / 2;
-  const referenceNode = insertAfter ? targetCard.nextSibling : targetCard;
-  if (referenceNode === dragCard || (insertAfter && targetCard.nextSibling === dragCard)) return false;
-  dashboard.insertBefore(dragCard, referenceNode);
-  return true;
-}
-
-function enableDrag() {
-  const dashboard = document.getElementById('dashboard');
-  document.querySelectorAll('.card').forEach(card => {
-    const head = card.querySelector('.card-head');
-    const handle = card.querySelector('.resize-handle');
-    applyCardSpan(card, card.dataset.span || card.dataset.defaultSpan || 8);
-    card.classList.add('reflowing');
-
-    const beginDragSession = (startEvent, start) => {
-      const cards = [...dashboard.querySelectorAll('.card')];
-      let activeTarget = null;
-      card.classList.add('dragging');
-
-      const move = e => {
-        const point = pointerClientXY(e);
-        const dx = point.x - start.x;
-        const dy = point.y - start.y;
-        card.style.transform = `translate(${dx}px, ${dy}px) scale(1.02)`;
-
-        const over = findReorderTarget(cards, card, point.x, point.y);
-        if (activeTarget !== over) {
-          cards.forEach(c => c.classList.remove('drop-target'));
-          activeTarget = over;
-          if (activeTarget) activeTarget.classList.add('drop-target');
-        }
-        if (activeTarget) reorderCardBefore(dashboard, card, activeTarget, point.x);
-        if (e.cancelable) e.preventDefault();
-      };
-
-      const up = () => {
-        cards.forEach(c => c.classList.remove('drop-target'));
-        card.classList.remove('dragging');
-        card.style.transform = '';
-        saveLayout();
-        window.removeEventListener('mousemove', move);
-        window.removeEventListener('mouseup', up);
-        window.removeEventListener('touchmove', move);
-        window.removeEventListener('touchend', up);
-      };
-
-      window.addEventListener('mousemove', move);
-      window.addEventListener('mouseup', up);
-      window.addEventListener('touchmove', move, { passive: false });
-      window.addEventListener('touchend', up);
-    };
-
-    const startDrag = ev => {
-      if (ev.target.closest('.resize-handle') || ev.target.closest('button') || ev.target.closest('a') || ev.target.closest('input') || ev.target.closest('select') || ev.target.closest('textarea')) return;
-      if (ev.type === 'touchstart') {
-        const start = pointerClientXY(ev);
-        let dragging = false;
-        const touchMove = moveEv => {
-          const point = pointerClientXY(moveEv);
-          if (!dragging && Math.hypot(point.x - start.x, point.y - start.y) > 10) {
-            dragging = true;
-            beginDragSession(ev, start);
-          }
-          if (dragging && moveEv.cancelable) moveEv.preventDefault();
-        };
-        const touchEnd = () => {
-          window.removeEventListener('touchmove', touchMove);
-          window.removeEventListener('touchend', touchEnd);
-        };
-        window.addEventListener('touchmove', touchMove, { passive: false });
-        window.addEventListener('touchend', touchEnd);
-        return;
-      }
-      ev.preventDefault();
-      beginDragSession(ev, pointerClientXY(ev));
-    };
-
-    head.addEventListener('mousedown', startDrag);
-    head.addEventListener('touchstart', startDrag, { passive: true });
-
-    handle?.addEventListener('mousedown', ev => {
-      ev.preventDefault();
-      ev.stopPropagation();
-      const startX = ev.clientX;
-      const startSpan = Number(card.dataset.span || card.dataset.defaultSpan || 8);
-      const dashboardRect = dashboard.getBoundingClientRect();
-      const colWidth = (dashboardRect.width - GRID_GAP * (GRID_COLS - 1)) / GRID_COLS;
-      function move(e) {
-        const deltaCols = Math.round((e.clientX - startX) / Math.max(1, colWidth + GRID_GAP));
-        applyCardSpan(card, startSpan + deltaCols);
-      }
-      function up() {
-        saveLayout();
-        window.removeEventListener('mousemove', move);
-        window.removeEventListener('mouseup', up);
-      }
-      window.addEventListener('mousemove', move);
-      window.addEventListener('mouseup', up);
-    });
-  });
-}
-
-async function refresh() {
-  const tf = encodeURIComponent(normalizeTimeframe(stateUi.timeframe));
-  const limit = Math.max(30, Math.min(1000, Number(stateUi.candleLimit || DEFAULT_LIMITS[stateUi.timeframe] || 180)));
-  const offset = Math.max(0, Number(stateUi.historyOffset || 0));
-  const res = await fetch(`/api/dashboard?interval=${tf}&limit=${limit}&offset=${offset}`, { cache: 'no-store' });
-  const data = await res.json();
-  const { status, state, runtime, cumulative, events, freshnessSeconds, serverTimeUtc, ohlcv } = data;
-  const grid = { ...((status.stats || {}).grid || {}), openOrders: ((runtime.grid || {}).orders || []).length };
-  const pos = status.position || {};
-  stateUi.lastState = state;
-  stateUi.lastStatus = status;
-  const botBtn = document.getElementById('bot-toggle-btn');
-  botBtn.textContent = state.paused ? 'Play bot' : 'Pause bot';
-  botBtn.classList.toggle('paused', !!state.paused);
-  botBtn.classList.toggle('playing', !state.paused);
-
-  const activeInterval = normalizeTimeframe(data.chartInterval || stateUi.timeframe || status.interval || '1m');
-  stateUi.timeframe = activeInterval;
-  stateUi.lastOhlcv = ohlcv || [];
-  localStorage.setItem('tradebot-chart-timeframe', activeInterval);
-  document.getElementById('pill-symbol').textContent = status.symbol || '--';
-  document.getElementById('pill-interval').textContent = activeInterval;
-  document.getElementById('server-time').textContent = fmtDate(serverTimeUtc);
-  document.getElementById('fresh-label').textContent = freshnessSeconds != null ? `Live payload • ${humanAge(freshnessSeconds)}` : 'No timestamp';
-
-  renderStickySummary(status, cumulative, grid);
-  const ai = ((status.stats || {}).ai || {});
-  const gridSkipReason = (grid.skipped || status.lastEvent === 'AI_SKIP' || status.lastEvent === 'GRID_SKIP')
-    ? (grid.skipReason || (ai.gridAllowed === false ? 'ai_grid_disallowed' : null) || status.lastEvent)
-    : null;
-
-  renderKVs('status-list', [
-    ['Paused', state.paused ? 'Yes' : 'No', '', getChanged('status.paused', state.paused)],
-    ['Last event', status.lastEvent || '--', '', getChanged('status.lastEvent', status.lastEvent)],
-    ['Grid status', gridSkipReason ? `Waiting (${gridSkipReason})` : 'Active / eligible', '', getChanged('status.gridreason', gridSkipReason || 'active')],
-    ['AI confidence', ai.confidence != null ? fmtPct(ai.confidence) : '--', '', getChanged('status.aiconf', ai.confidence)],
-    ['Status timestamp', fmtDate(status.tsUtc), '', getChanged('status.tsUtc', status.tsUtc)],
-    ['Runtime saved', fmtDate(runtime.savedAt), '', getChanged('runtime.savedAt', runtime.savedAt)],
-    ['Freshness', humanAge(freshnessSeconds), '', getChanged('freshness', Math.round((freshnessSeconds || 0) * 10) / 10)]
-  ]);
-  renderKVs('position-list', status.position ? [
-    ['Entry price', fmtPrice(pos.entryPrice), '', getChanged('pos.entry', pos.entryPrice)],
-    ['Quantity BTC', fmtNum(pos.qtyBtc, 6), '', getChanged('pos.qty', pos.qtyBtc)],
-    ['Unrealized PnL', fmtMoney(pos.unrealizedPnlUsdt), signedClass(pos.unrealizedPnlUsdt), getChanged('pos.pnl', pos.unrealizedPnlUsdt)],
-    ['Unrealized PnL %', fmtPct(pos.unrealizedPnlPct), signedClass(pos.unrealizedPnlPct), getChanged('pos.pnlpct', pos.unrealizedPnlPct)],
-    ['Trail stop', pos.stop ? fmtPrice(pos.stop) : 'Not armed', '', getChanged('pos.stop', pos.stop)],
-    ['Entry time', fmtDate(pos.entryTimeUtc), '', getChanged('pos.time', pos.entryTimeUtc)]
-  ] : [['Position', 'No open inventory', '', false]]);
-  renderKVs('grid-list', [
-    ['Mode', grid.mode || state.gridMode || '--', '', getChanged('grid.mode', grid.mode || state.gridMode)],
-    ['Spacing', fmtPct(grid.spacingPct), '', getChanged('grid.spacing', grid.spacingPct)],
-    ['Levels', grid.levels ?? '--', '', getChanged('grid.levels', grid.levels)],
-    ['Open orders', grid.openOrders ?? '--', '', getChanged('grid.orders', grid.openOrders)],
-    ['Reserved USDT', fmtMoney(runtime.grid?.reserved_usdt), '', getChanged('grid.reserved_usdt', runtime.grid?.reserved_usdt)],
-    ['Reserved BTC', fmtNum(runtime.grid?.reserved_btc, 6), '', getChanged('grid.reserved_btc', runtime.grid?.reserved_btc)]
-  ]);
-  renderKVs('perf-list', [
-    ['Equity', fmtMoney(status.equityUsdt), signedClass(status.equityUsdt), getChanged('perf.equity', status.equityUsdt)],
-    ['Session PnL', fmtMoney((status.stats || {}).pnlUsdt), signedClass((status.stats || {}).pnlUsdt), getChanged('perf.pnl', (status.stats || {}).pnlUsdt)],
-    ['Trades', cumulative.trades ?? 0, '', getChanged('perf.trades', cumulative.trades)],
-    ['Wins', cumulative.wins ?? 0, '', getChanged('perf.wins', cumulative.wins)],
-    ['Losses', cumulative.losses ?? 0, '', getChanged('perf.losses', cumulative.losses)],
-    ['Peak equity', fmtMoney(runtime.stats?.peak_equity), '', getChanged('perf.peak', runtime.stats?.peak_equity)]
-  ]);
-  renderKVs('risk-list', [
-    ['Allow live orders', state.allowLiveOrders ? 'Yes' : 'No', '', getChanged('risk.live', state.allowLiveOrders)],
-    ['Max daily loss', fmtPct(state.maxDailyLossPct), '', getChanged('risk.maxloss', state.maxDailyLossPct)],
-    ['Max drawdown', fmtPct((status.stats || {}).maxDrawdownPct), '', getChanged('risk.dd', (status.stats || {}).maxDrawdownPct)],
-    ['Cooldown until', runtime.stats?.cooldown_until ? fmtDate(runtime.stats.cooldown_until) : 'None', '', getChanged('risk.cooldown', runtime.stats?.cooldown_until)],
-    ['Trend strength', fmtPct((status.stats || {}).trendStrength), '', getChanged('risk.trend', (status.stats || {}).trendStrength)]
-  ]);
-  renderKVs('config-list', [
-    ['Symbol', state.symbol || '--', '', getChanged('cfg.symbol', state.symbol)],
-    ['Interval', state.interval || '--', '', getChanged('cfg.interval', state.interval)],
-    ['Fee (bps)', state.feeBps ?? '--', '', getChanged('cfg.fee', state.feeBps)],
-    ['Paper limit slippage', state.paperLimitSlipBps ?? 3, '', getChanged('cfg.limitslip', state.paperLimitSlipBps)],
-    ['Paper market slippage', state.paperMarketSlipBps ?? 12, '', getChanged('cfg.marketslip', state.paperMarketSlipBps)],
-    ['Grid max exposure', fmtPct(state.gridMaxExposurePct), '', getChanged('cfg.maxexpo', state.gridMaxExposurePct)]
-  ]);
-
-  drawAllocation(Number(status.usdt || 0), Number(status.btc || 0) * Number(status.price || 0), Number(status.equityUsdt || 0));
-  renderEvents(events || []);
-  renderOrders((runtime.grid || {}).orders || [], runtime.grid || {});
-  drawCandles(ohlcv || []);
-  renderTimeframeControls();
-}
-
-loadLayout();
-enableDrag();
-renderTimeframeControls();
-setInterval(refresh, 1000);
-refresh();
-</script>
+<script src="/static/dashboard.v1.js?v=4"></script>
 </body>
 </html>'''
 
 
 def read_json(path: Path) -> dict:
-    if not path.exists():
-        return {}
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+    return DATA_ADAPTER.read_json(path)
 
 
 def write_json(path: Path, payload: dict) -> None:
-    tmp = path.with_suffix(path.suffix + '.tmp')
-    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding='utf-8')
-    tmp.replace(path)
+    DATA_ADAPTER.write_json(path, payload)
+
+
+def update_state_locked(updater) -> dict:
+    return DATA_ADAPTER.update_state(STATE_PATH, updater)
+
+
+def next_sequence(channel: str) -> int:
+    with _sequence_lock:
+        _sequences[channel] = int(_sequences.get(channel, 0)) + 1
+        return _sequences[channel]
+
+
+def _state_ai_models(state: dict) -> list[str]:
+    models = []
+    for key in ("aiModel", "aiQuickModel", "aiDeepModel", "aiFallbackModel"):
+        value = str(state.get(key) or "").strip()
+        if value and value not in models:
+            models.append(value)
+    return models
+
+
+def _stop_local_ollama_models(state: dict) -> None:
+    endpoint = active_ai_endpoint(state)
+    base_url = _normalize_ai_base_url(endpoint.get("baseUrl") or state.get("aiBaseUrl") or "")
+    if "127.0.0.1:" not in base_url and "localhost:" not in base_url:
+        return
+    for model in _state_ai_models(state):
+        try:
+            subprocess.run(["ollama", "stop", model], cwd=str(BASE_DIR), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+        except Exception:
+            continue
+
+
+def _sync_ai_sidecar_for_state(state: dict, patch: dict) -> None:
+    if "aiEnabled" in patch and patch["aiEnabled"] is False:
+        try:
+            subprocess.run([str(BASE_DIR / ".venv" / "bin" / "python"), str(BASE_DIR / "run_ai_sidecar_detached.py"), "stop"], cwd=str(BASE_DIR), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+        except Exception:
+            pass
+        write_json(AI_SIGNAL_PATH, {"enabled": False, "source": "disabled", "tsUtc": datetime.now(timezone.utc).isoformat()})
+        _stop_local_ollama_models(state)
+        return
+    if patch.get("aiEnabled") is True:
+        try:
+            subprocess.run([str(BASE_DIR / ".venv" / "bin" / "python"), str(BASE_DIR / "run_ai_sidecar_detached.py"), "start"], cwd=str(BASE_DIR), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+        except Exception:
+            pass
+        return
+    if state.get("aiEnabled", False) and any(key in patch for key in AI_RESTART_FIELDS):
+        try:
+            subprocess.run([str(BASE_DIR / ".venv" / "bin" / "python"), str(BASE_DIR / "run_ai_sidecar_detached.py"), "restart"], cwd=str(BASE_DIR), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+        except Exception:
+            pass
+
+
+def coerce_state_patch(body: dict) -> dict:
+    patch = {}
+    for key, caster in EDITABLE_STATE_FIELDS.items():
+        if key not in body:
+            continue
+        raw = body[key]
+        if caster is bool:
+            value = str(raw).strip().lower() in {'1', 'true', 'yes', 'on'}
+        elif caster is int:
+            value = int(float(raw))
+        elif caster is float:
+            value = float(raw)
+        elif caster is str:
+            value = str(raw).strip()
+        else:
+            continue
+        if key in STATE_FIELD_BOUNDS:
+            lo, hi = STATE_FIELD_BOUNDS[key]
+            if value < lo or value > hi:
+                raise ValueError(f'{key} outside allowed range {lo}..{hi}')
+        if key in STATE_FIELD_CHOICES and value not in STATE_FIELD_CHOICES[key]:
+            allowed = ', '.join(sorted(STATE_FIELD_CHOICES[key]))
+            raise ValueError(f'{key} must be one of: {allowed}')
+        patch[key] = value
+    endpoint_key = patch.get("aiEndpointKey")
+    if endpoint_key:
+        endpoint = AI_ENDPOINT_BY_KEY.get(endpoint_key)
+        if endpoint and endpoint_key != "custom":
+            patch["aiProvider"] = endpoint["provider"]
+            patch["aiBaseUrl"] = endpoint["baseUrl"]
+        elif endpoint_key == "custom" and not patch.get("aiProvider"):
+            patch["aiProvider"] = "ollama"
+    elif "aiBaseUrl" in patch:
+        patch["aiEndpointKey"] = infer_ai_endpoint_key({"aiBaseUrl": patch["aiBaseUrl"]})
+    return patch
+
+
+def _normalize_ai_base_url(base_url: str) -> str:
+    return str(base_url or "").strip().rstrip("/")
+
+
+def infer_ai_endpoint_key(state: dict) -> str:
+    selected = state.get("aiEndpointKey")
+    if selected in AI_ENDPOINT_BY_KEY:
+        if selected != "custom":
+            selected_url = _normalize_ai_base_url(AI_ENDPOINT_BY_KEY[selected]["baseUrl"])
+            state_url = _normalize_ai_base_url(state.get("aiBaseUrl") or "")
+            if state_url and state_url != selected_url:
+                return "custom"
+        return str(selected)
+    base_url = _normalize_ai_base_url(state.get("aiBaseUrl") or os.getenv("TRADEBOT_AI_BASE_URL") or "")
+    for endpoint in AI_ENDPOINTS:
+        if endpoint["key"] == "custom":
+            continue
+        if _normalize_ai_base_url(endpoint["baseUrl"]) == base_url:
+            return endpoint["key"]
+    return "custom"
+
+
+def active_ai_endpoint(state: dict) -> dict:
+    key = infer_ai_endpoint_key(state)
+    endpoint = dict(AI_ENDPOINT_BY_KEY.get(key) or AI_ENDPOINT_BY_KEY["custom"])
+    if key == "custom":
+        endpoint["baseUrl"] = _normalize_ai_base_url(state.get("aiBaseUrl") or os.getenv("TRADEBOT_AI_BASE_URL") or "")
+        endpoint["provider"] = str(state.get("aiProvider") or endpoint.get("provider") or "ollama")
+    return endpoint
+
+
+def _ai_model_candidates(base_url: str) -> list[str]:
+    base_url = _normalize_ai_base_url(base_url)
+    if not base_url:
+        return []
+    candidates = [f"{base_url}/models"]
+    if base_url.endswith('/v1'):
+        candidates.append(f"{base_url[:-3]}/api/tags")
+    else:
+        candidates.append(f"{base_url}/v1/models")
+        candidates.append(f"{base_url}/api/tags")
+    return candidates
+
+
+def _extract_ai_model_names(payload: dict) -> list[str]:
+    items = payload.get('data') or payload.get('models') or []
+    names = []
+    for item in items:
+        if isinstance(item, dict):
+            name = item.get('id') or item.get('name') or item.get('model')
+            if name:
+                names.append(str(name))
+        elif item:
+            names.append(str(item))
+    seen = []
+    for name in names:
+        if name not in seen:
+            seen.append(name)
+    return seen
+
+
+def fetch_ai_models(base_url: str, *, force: bool = False) -> list[str]:
+    base_url = _normalize_ai_base_url(base_url)
+    if not base_url:
+        return []
+    now = time.time()
+    cached = _ai_model_cache.get(base_url)
+    if cached and not force and now - cached[0] < AI_MODEL_CACHE_SECONDS:
+        return cached[1]
+    models: list[str] = []
+    for url in _ai_model_candidates(base_url):
+        try:
+            resp = requests.get(url, timeout=(0.35, 0.8))
+            resp.raise_for_status()
+            models = _extract_ai_model_names(resp.json())
+            break
+        except Exception:
+            continue
+    _ai_model_cache[base_url] = (now, models)
+    return models
+
+
+def get_ai_endpoint_models(state: dict) -> dict[str, list[str]]:
+    models: dict[str, list[str]] = {}
+    for endpoint in AI_ENDPOINTS:
+        if endpoint["key"] == "custom":
+            base_url = _normalize_ai_base_url(state.get("aiBaseUrl") or "")
+            models[endpoint["key"]] = fetch_ai_models(base_url) if infer_ai_endpoint_key(state) == "custom" else []
+        else:
+            models[endpoint["key"]] = fetch_ai_models(endpoint["baseUrl"])
+    return models
+
+
+def get_ai_models(state: dict) -> list[str]:
+    endpoint = active_ai_endpoint(state)
+    return fetch_ai_models(endpoint.get("baseUrl", ""))
+
+
+def ai_endpoint_payload(state: dict) -> tuple[dict, dict[str, list[str]]]:
+    endpoint = active_ai_endpoint(state)
+    models_by_endpoint = get_ai_endpoint_models(state)
+    return endpoint, models_by_endpoint
 
 
 def read_events() -> list[dict]:
-    if not TRADES_PATH.exists():
-        return []
-    rows = []
-    try:
-        with TRADES_PATH.open("r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rows.append(json.loads(line))
-                except Exception:
-                    continue
-    except Exception:
-        return []
-    return rows[-500:]
+    return DATA_ADAPTER.read_events(TRADES_PATH, limit=EVENT_SNAPSHOT_LIMIT)
+
+
+def event_cursor(events: list[dict]) -> int:
+    cursor = 0
+    for event in events or []:
+        try:
+            cursor = max(cursor, int(event.get("_eventId") or event.get("eventId") or 0))
+        except Exception:
+            continue
+    return cursor
+
+
+def build_event_patch(events: list[dict], last_cursor: int, *, snapshot: bool = False) -> dict:
+    cursor = event_cursor(events)
+    if snapshot:
+        return {"mode": "snapshot", "cursor": cursor, "items": events or []}
+    items: list[dict] = []
+    for event in events or []:
+        try:
+            event_id = int(event.get("_eventId") or event.get("eventId") or 0)
+        except Exception:
+            event_id = 0
+        if event_id > last_cursor:
+            items.append(event)
+    return {"mode": "delta", "cursor": cursor, "items": items}
+
+
+def order_patch_key(order: dict) -> str:
+    body = {
+        "side": order.get("side"),
+        "price": order.get("price"),
+        "qty_btc": order.get("qty_btc") or order.get("qtyBtc"),
+        "total": order.get("total") or order.get("notionalUsdt"),
+        "type": order.get("type"),
+    }
+    explicit = order.get("id") or order.get("orderId") or order.get("clientOrderId")
+    if explicit:
+        body["id"] = explicit
+    raw = json.dumps(body, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def normalize_order_patch_items(orders: list[dict]) -> list[dict]:
+    items = []
+    for order in orders or []:
+        item = dict(order)
+        item["_orderKey"] = item.get("_orderKey") or order_patch_key(item)
+        items.append(item)
+    return items
+
+
+def order_signature(orders: list[dict]) -> str:
+    items = normalize_order_patch_items(orders)
+    raw = json.dumps(sorted(items, key=lambda item: str(item.get("_orderKey"))), sort_keys=True, separators=(",", ":"))
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def build_order_patch(orders: list[dict], previous: dict[str, dict] | None, *, snapshot: bool = False) -> tuple[dict, dict[str, dict]]:
+    items = normalize_order_patch_items(orders)
+    current = {str(item["_orderKey"]): item for item in items}
+    signature = order_signature(items)
+    if snapshot or previous is None:
+        return {"mode": "snapshot", "signature": signature, "items": items, "ops": []}, current
+    ops = []
+    for key, item in current.items():
+        if previous.get(key) != item:
+            ops.append({"op": "upsert", "key": key, "item": item})
+    for key in previous:
+        if key not in current:
+            ops.append({"op": "remove", "key": key})
+    return {"mode": "delta", "signature": signature, "items": [], "ops": ops}, current
+
+
+def strip_orders_from_runtime(runtime: dict) -> dict:
+    payload = dict(runtime or {})
+    grid = dict(payload.get("grid") or {})
+    grid.pop("orders", None)
+    payload["grid"] = grid
+    return payload
 
 
 def _backfill_history_from_logs(items: deque) -> None:
@@ -1037,7 +633,10 @@ def _backfill_history_from_logs(items: deque) -> None:
 
 
 def update_history(status: dict) -> dict:
-    history = read_json(HISTORY_PATH) or {}
+    history = sqlite_store.read_history(limit=5000)
+    if not history.get("items") and HISTORY_PATH.exists():
+        history = read_json(HISTORY_PATH) or {}
+        sqlite_store.import_history_items(history.get("items", []))
     items = deque(history.get("items", []), maxlen=5000)
     _backfill_history_from_logs(items)
     price = status.get("price")
@@ -1046,7 +645,9 @@ def update_history(status: dict) -> dict:
     if isinstance(price, (int, float)) and isinstance(equity, (int, float)) and ts:
         if not items or items[-1].get("ts") != ts:
             items.append({"ts": ts, "price": price, "equity": equity})
+        sqlite_store.upsert_history_item(ts, price, equity)
     payload = {"items": list(items)}
+    sqlite_store.import_history_items(payload["items"])
     HISTORY_PATH.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     return payload
 
@@ -1097,12 +698,123 @@ def merge_live_price_into_ohlcv(rows: list[dict], live_price: float | None) -> l
     return payload
 
 
+def latest_ohlcv_price(rows: list[dict]) -> float | None:
+    if not rows:
+        return None
+    try:
+        return float(rows[-1].get("close"))
+    except Exception:
+        return None
+
+
+def apply_market_price_to_status(status: dict, market_price: float | None) -> dict:
+    payload = dict(status or {})
+    if market_price is None:
+        return payload
+    try:
+        price = float(market_price)
+    except Exception:
+        return payload
+    payload["price"] = price
+    payload["marketDataTsUtc"] = datetime.now(timezone.utc).isoformat()
+    try:
+        usdt = float(payload.get("usdt") or 0.0)
+        btc = float(payload.get("btc") or 0.0)
+        payload["equityUsdt"] = usdt + (btc * price)
+    except Exception:
+        pass
+    position = dict(payload.get("position") or {})
+    try:
+        qty = float(position.get("qtyBtc") or payload.get("btc") or 0.0)
+        entry = float(position.get("entryPrice") or 0.0)
+        if qty and entry:
+            unrealized = (price - entry) * qty
+            position["unrealizedPnlUsdt"] = unrealized
+            position["unrealizedPnlPct"] = (price / entry) - 1.0
+            payload["position"] = position
+    except Exception:
+        payload["position"] = position
+    return payload
+
+
+def interval_duration_ms(interval: str) -> int:
+    interval = normalize_interval(interval)
+    return {
+        "1s": 1_000,
+        "1m": 60_000,
+        "5m": 5 * 60_000,
+        "30m": 30 * 60_000,
+        "1h": 60 * 60_000,
+        "1d": 24 * 60 * 60_000,
+        "1w": 7 * 24 * 60 * 60_000,
+        "1M": 31 * 24 * 60 * 60_000,
+    }[interval]
+
+
+def _iso_to_ms(ts: str | None) -> int | None:
+    if not ts:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return int(dt.astimezone(timezone.utc).timestamp() * 1000)
+    except Exception:
+        return None
+
+
+def apply_status_price_to_ohlcv(ohlcv: list[dict], status: dict, interval: str) -> list[dict]:
+    rows = [dict(row) for row in (ohlcv or [])]
+    if not rows:
+        return rows
+    status_age = freshness_seconds(status.get("tsUtc"))
+    if status_age is None or status_age > max(10.0, (REFRESH_MS / 1000.0) * 3.0):
+        return rows
+    try:
+        price = float(status.get("price"))
+    except Exception:
+        return rows
+    if not price:
+        return rows
+    duration = interval_duration_ms(interval)
+    ts_ms = _iso_to_ms(status.get("tsUtc")) or int(datetime.now(timezone.utc).timestamp() * 1000)
+    open_ms = (ts_ms // duration) * duration
+    close_ms = open_ms + duration - 1
+    last = dict(rows[-1])
+    last_open = int(last.get("openTimeMs") or 0)
+    symbol = status.get("symbol") or last.get("symbol") or "BTCUSDT"
+    normalized_interval = normalize_interval(interval)
+    if open_ms < last_open:
+        return rows
+    if open_ms == last_open:
+        last["close"] = price
+        last["high"] = max(float(last.get("high") or price), price)
+        last["low"] = min(float(last.get("low") or price), price)
+        last["closeTimeMs"] = int(last.get("closeTimeMs") or close_ms)
+        rows[-1] = last
+        return rows
+    rows.append({
+        "openTimeMs": open_ms,
+        "open": float(last.get("close") or price),
+        "high": max(float(last.get("close") or price), price),
+        "low": min(float(last.get("close") or price), price),
+        "close": price,
+        "volumeBase": 0.0,
+        "closeTimeMs": close_ms,
+        "volumeUsdt": 0.0,
+        "symbol": symbol,
+        "interval": normalized_interval,
+    })
+    return rows[-MAX_OHLCV_LIMIT:]
+
+
 def get_ohlcv(symbol: str, interval: str, limit: int = 120, offset: int = 0) -> list[dict]:
     interval = normalize_interval(interval)
     limit = max(30, min(MAX_OHLCV_LIMIT, int(limit)))
     offset = max(0, int(offset))
     key = (symbol, interval, limit, offset)
-    if key in _ohlcv_cache:
+    ttl = 0.5 if interval == "1s" else (20 if interval == "1m" else 300)
+    if key in _ohlcv_cache and (time.time() - _ohlcv_cache_at.get(key, 0.0)) < ttl:
         return _ohlcv_cache[key]
     try:
         binance_interval = SUPPORTED_INTERVALS[interval]["binance"]
@@ -1124,112 +836,633 @@ def get_ohlcv(symbol: str, interval: str, limit: int = 120, offset: int = 0) -> 
             "interval": interval,
         } for r in rows]
         _ohlcv_cache[key] = payload
+        _ohlcv_cache_at[key] = time.time()
         return payload
     except Exception:
         return _ohlcv_cache.get(key, [])
 
 
-class Handler(BaseHTTPRequestHandler):
-    def _read_json_body(self) -> dict:
-        try:
-            length = int(self.headers.get('Content-Length', '0') or '0')
-        except Exception:
-            length = 0
-        if length <= 0:
-            return {}
-        raw = self.rfile.read(length)
-        try:
-            return json.loads(raw.decode('utf-8'))
-        except Exception:
-            return {}
+def _fmt_num(value, digits: int = 2) -> str:
+    try:
+        return f"{float(value):,.{digits}f}"
+    except Exception:
+        return "--"
 
-    def _send(self, code: int, body: bytes, content_type: str) -> None:
-        self.send_response(code)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
 
-    def do_POST(self):
-        try:
-            parsed = urlparse(self.path)
-            if parsed.path == '/api/control':
-                body = self._read_json_body()
-                state = read_json(STATE_PATH)
-                state['paused'] = bool(body.get('paused'))
-                write_json(STATE_PATH, state)
-                payload = {'ok': True, 'paused': state['paused']}
-                self._send(200, json.dumps(payload).encode('utf-8'), 'application/json; charset=utf-8')
-                return
-            self._send(404, b'Not found', 'text/plain; charset=utf-8')
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            try:
-                self._send(500, json.dumps({'error': str(e)}).encode('utf-8'), 'application/json; charset=utf-8')
-            except Exception:
-                pass
+def _fmt_money(value) -> str:
+    return f"${_fmt_num(value, 2)}"
 
-    def do_GET(self):
+
+def _fmt_pct(value) -> str:
+    try:
+        return f"{float(value) * 100:.2f}%"
+    except Exception:
+        return "--"
+
+
+def _signed_class(value) -> str:
+    try:
+        value = float(value)
+    except Exception:
+        return ""
+    return "positive" if value > 0 else ("negative" if value < 0 else "")
+
+
+def _strip_html(text: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", text or "")).strip()
+
+
+def _parse_json_object(text: str) -> dict:
+    if not text:
+        raise ValueError("empty local AI response")
+    start = text.find("{")
+    end = text.rfind("}")
+    if start < 0 or end < start:
+        raise ValueError("no JSON object in local AI response")
+    return json.loads(text[start:end + 1])
+
+
+def _fetch_news_items(limit: int = 12) -> list[dict]:
+    items: list[dict] = []
+    for source, url in NEWS_SOURCES:
         try:
-            parsed = urlparse(self.path)
-            if parsed.path in ("/", "/index.html"):
-                self._send(200, HTML.encode("utf-8"), "text/html; charset=utf-8")
-                return
-            if parsed.path == "/api/dashboard":
-                qs = parse_qs(parsed.query)
-                status = read_json(STATUS_PATH)
-                state = read_json(STATE_PATH)
-                runtime = read_json(RUNTIME_PATH)
-                cumulative = read_json(CUM_PATH)
-                symbol = status.get("symbol") or state.get("symbol", "BTCUSDT")
-                requested_interval = normalize_interval(qs.get("interval", [status.get("interval") or state.get("interval", "1m")])[0])
-                raw_limit = qs.get("limit", [SUPPORTED_INTERVALS[requested_interval]["default_limit"]])[0]
-                raw_offset = qs.get("offset", [0])[0]
+            resp = requests.get(url, timeout=12, headers={"User-Agent": "tradebot-dashboard/1.0"})
+            resp.raise_for_status()
+            root = ET.fromstring(resp.content)
+            for node in root.findall(".//item")[:8]:
+                title = _strip_html(node.findtext("title") or "")
+                link = (node.findtext("link") or "").strip()
+                desc = _strip_html(node.findtext("description") or "")
+                pub_raw = node.findtext("pubDate") or ""
+                published = ""
+                sort_ts = 0.0
                 try:
-                    limit = max(30, min(MAX_OHLCV_LIMIT, int(raw_limit)))
+                    dt = parsedate_to_datetime(pub_raw)
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    dt = dt.astimezone(timezone.utc)
+                    published = dt.isoformat()
+                    sort_ts = dt.timestamp()
                 except Exception:
-                    limit = SUPPORTED_INTERVALS[requested_interval]["default_limit"]
-                try:
-                    offset = max(0, int(raw_offset))
-                except Exception:
-                    offset = 0
-                live_price = status.get('price')
-                payload = {
-                    "status": status,
-                    "state": state,
-                    "runtime": runtime,
-                    "cumulative": cumulative,
-                    "events": read_events(),
-                    "history": update_history(status),
-                    "ohlcv": merge_live_price_into_ohlcv(get_ohlcv(symbol, requested_interval, limit=limit, offset=offset), live_price),
-                    "chartInterval": requested_interval,
-                    "chartLimit": limit,
-                    "chartOffset": offset,
-                    "supportedIntervals": list(SUPPORTED_INTERVALS.keys()),
-                    "freshnessSeconds": freshness_seconds(status.get("tsUtc")),
-                    "serverTimeUtc": datetime.now(timezone.utc).isoformat(),
-                }
-                self._send(200, json.dumps(payload).encode("utf-8"), "application/json; charset=utf-8")
-                return
-            if parsed.path == "/health":
-                self._send(200, b'{"status":"ok"}', "application/json; charset=utf-8")
-                return
-            self._send(404, b'Not found', 'text/plain; charset=utf-8')
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
+                    published = pub_raw
+                if not title:
+                    continue
+                haystack = f"{title} {desc}".lower()
+                score = 0
+                for word in ("bitcoin", "btc", "crypto", "etf", "fed", "inflation", "dollar", "rates", "liquidity", "macro"):
+                    if word in haystack:
+                        score += 1
+                items.append({
+                    "source": source,
+                    "title": title[:180],
+                    "url": link,
+                    "summary": desc[:260],
+                    "publishedUtc": published,
+                    "sortTs": sort_ts,
+                    "score": score,
+                })
+        except Exception:
+            continue
+    deduped: list[dict] = []
+    seen: set[str] = set()
+    for item in sorted(items, key=lambda x: (x.get("score", 0), x.get("sortTs", 0)), reverse=True):
+        key = item["title"].lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+        if len(deduped) >= limit:
+            break
+    for item in deduped:
+        item.pop("sortTs", None)
+        item.pop("score", None)
+    return deduped
+
+
+def _deterministic_regime_rows(status: dict, ohlcv: list[dict], intelligence_error: str = "") -> tuple[list[dict], dict]:
+    first, last = (ohlcv[0] if ohlcv else None), (ohlcv[-1] if ohlcv else None)
+    change = (float(last.get("close") or 0) / float(first.get("open") or 1) - 1) if first and last else 0.0
+    ranges = [float(c.get("high") or 0) - float(c.get("low") or 0) for c in (ohlcv or [])]
+    avg_range = sum(ranges) / len(ranges) if ranges else 0.0
+    price = float(status.get("price") or (last or {}).get("close") or 0.0)
+    vol_pct = avg_range / price if price > 0 else 0.0
+    equity = float(status.get("equityUsdt") or 0.0)
+    exposure = (float(status.get("btc") or 0.0) * price / equity) if equity > 0 else 0.0
+    trend_status = "Range" if abs(change) < 0.015 else ("Uptrend" if change > 0 else "Downtrend")
+    rows = [
+        {"signal": "Trend", "status": trend_status, "score": 0.68 if trend_status == "Range" else 0.78, "note": "Price oscillating inside range" if trend_status == "Range" else f"{change * 100:.2f}% move over visible candles", "tone": "blue"},
+        {"signal": "Liquidity", "status": "Improving" if exposure < 0.55 else "Tight", "score": 0.74 if exposure < 0.55 else 0.52, "note": "Capital available for grid" if exposure < 0.55 else "Exposure using more capital", "tone": "green" if exposure < 0.55 else "orange"},
+        {"signal": "Volatility", "status": "Elevated" if vol_pct > 0.012 else "Calm", "score": 0.62 if vol_pct > 0.012 else 0.48, "note": "ATR proxy from live candles", "tone": "orange"},
+        {"signal": "ETF Demand", "status": "Watch", "score": 0.60, "note": "News flow refreshed every 30 minutes", "tone": "green"},
+        {"signal": "Macro Pressure", "status": "Tight", "score": 0.58, "note": "Rates and USD sensitivity", "tone": "orange"},
+        {"signal": "Execution Quality", "status": "Watch" if intelligence_error else "Good", "score": 0.45 if intelligence_error else 0.78, "note": intelligence_error[:80] if intelligence_error else "Local checks healthy", "tone": "orange" if intelligence_error else "green"},
+    ]
+    final = {
+        "title": "Range Consolidation" if trend_status == "Range" else trend_status,
+        "copy": "Choppy price action within established range. Maintain grid discipline and capital efficiency."
+        if trend_status == "Range"
+        else "Directional pressure is rising. Keep exits fee-aware and let AI gating manage exposure.",
+    }
+    return rows, final
+
+
+def _ai_config_for_dashboard(state: dict) -> tuple[str, str, float]:
+    base_url = str(state.get("aiBaseUrl") or os.getenv("TRADEBOT_AI_BASE_URL") or "http://127.0.0.1:11434/v1").rstrip("/")
+    model = str(state.get("aiModel") or state.get("aiQuickModel") or os.getenv("TRADEBOT_AI_MODEL") or "local")
+    timeout = min(120.0, max(10.0, float(state.get("aiTimeoutSeconds") or 60.0)))
+    return base_url, model, timeout
+
+
+def _local_ai_assess_intelligence(state: dict, status: dict, ohlcv: list[dict], news_items: list[dict]) -> dict:
+    base_url, model, timeout = _ai_config_for_dashboard(state)
+    prompt_payload = {
+        "task": "Assess Bitcoin/crypto news and market regime for a grid trading dashboard. Return strict JSON only.",
+        "schema": {
+            "newsCards": [{"title": "string", "source": "string", "age": "string", "sentiment": "Bullish|Neutral|Bearish", "impact": "1-8 integer"}],
+            "regimeSignals": [{"signal": "Trend|Liquidity|Volatility|ETF Demand|Macro Pressure|Execution Quality", "status": "string", "score": "0-1 number", "note": "string", "tone": "green|orange|blue"}],
+            "finalRegime": {"title": "string", "copy": "string"},
+        },
+        "market": {
+            "symbol": status.get("symbol", "BTCUSDT"),
+            "price": status.get("price"),
+            "equityUsdt": status.get("equityUsdt"),
+            "position": status.get("position"),
+            "recentCandles": (ohlcv or [])[-12:],
+        },
+        "news": news_items[:8],
+    }
+    messages = [
+        {"role": "system", "content": "You are a local crypto market analyst. Return one valid JSON object only."},
+        {"role": "user", "content": json.dumps(prompt_payload, sort_keys=True)},
+    ]
+    if "ollama" in str(state.get("aiProvider", "")).lower() or "11434" in base_url:
+        native_base = base_url[:-3] if base_url.endswith("/v1") else base_url
+        response = requests.post(
+            f"{native_base}/api/chat",
+            timeout=timeout,
+            json={
+                "model": model,
+                "messages": messages,
+                "stream": False,
+                "format": "json",
+                "think": False,
+                "options": {"temperature": 0.1, "num_predict": 700},
+            },
+        )
+        response.raise_for_status()
+        data = response.json()
+        content = ((data.get("message") or {}).get("content") or "").strip()
+    else:
+        response = requests.post(
+            f"{base_url}/chat/completions",
+            timeout=timeout,
+            headers={"Authorization": "Bearer local", "Content-Type": "application/json"},
+            json={"model": model, "temperature": 0.1, "max_tokens": 700, "stream": False, "messages": messages},
+        )
+        response.raise_for_status()
+        data = response.json()
+        content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+    parsed = _parse_json_object(content)
+    parsed["source"] = "local_ai"
+    parsed["model"] = model
+    return parsed
+
+
+def _fallback_intelligence(status: dict, ohlcv: list[dict], news_items: list[dict], error: str = "") -> dict:
+    rows, final = _deterministic_regime_rows(status, ohlcv, error)
+    cards = []
+    for item in (news_items or [])[:3]:
+        title_l = item.get("title", "").lower()
+        sentiment = "Bullish" if any(w in title_l for w in ("surge", "inflow", "rally", "rise", "gain")) else ("Bearish" if any(w in title_l for w in ("fall", "drop", "outflow", "hack", "loss")) else "Neutral")
+        cards.append({
+            "title": item.get("title", "Crypto market update"),
+            "source": item.get("source", "RSS"),
+            "age": item.get("publishedUtc", "latest")[:16].replace("T", " "),
+            "sentiment": sentiment,
+            "impact": 6 if "bitcoin" in title_l or "btc" in title_l else 4,
+            "url": item.get("url", ""),
+        })
+    while len(cards) < 3:
+        cards.append({"title": "Awaiting fresh crypto headlines", "source": "Local", "age": "30m refresh", "sentiment": "Neutral", "impact": 3, "url": ""})
+    return {"newsCards": cards, "regimeSignals": rows, "finalRegime": final, "source": "deterministic_fallback", "model": "", "error": error}
+
+
+def refresh_intelligence(state: dict, status: dict, ohlcv: list[dict]) -> dict:
+    started = datetime.now(timezone.utc)
+    news_items = _fetch_news_items()
+    error = ""
+    try:
+        if state.get("aiEnabled", True):
+            assessed = _local_ai_assess_intelligence(state, status, ohlcv, news_items)
+        else:
+            assessed = _fallback_intelligence(status, ohlcv, news_items, "local AI disabled")
+    except Exception as exc:
+        error = str(exc)
+        assessed = _fallback_intelligence(status, ohlcv, news_items, error)
+    payload = {
+        "generatedAtUtc": started.isoformat(),
+        "nextRefreshAtUtc": datetime.fromtimestamp(started.timestamp() + INTELLIGENCE_REFRESH_SECONDS, timezone.utc).isoformat(),
+        "rawNews": news_items,
+        **assessed,
+    }
+    write_json(INTELLIGENCE_PATH, payload)
+    return payload
+
+
+def get_intelligence(state: dict, status: dict, ohlcv: list[dict], force: bool = False) -> dict:
+    global _intelligence_refreshing
+    cached = read_json(INTELLIGENCE_PATH)
+    def _start_background_refresh() -> None:
+        global _intelligence_refreshing
+        if _intelligence_refreshing:
+            return
+        def _worker():
+            global _intelligence_refreshing
             try:
-                self._send(500, json.dumps({"error": str(e)}).encode("utf-8"), "application/json; charset=utf-8")
-            except Exception:
-                pass
+                refresh_intelligence(state, status, ohlcv)
+            finally:
+                with _intelligence_lock:
+                    _intelligence_refreshing = False
+        with _intelligence_lock:
+            if not _intelligence_refreshing:
+                _intelligence_refreshing = True
+                threading.Thread(target=_worker, daemon=True).start()
 
-    def log_message(self, format, *args):
-        return
+    if not force and cached.get("generatedAtUtc"):
+        age = freshness_seconds(cached.get("generatedAtUtc"))
+        if age is not None and age < INTELLIGENCE_REFRESH_SECONDS:
+            return cached
+        _start_background_refresh()
+        cached["refreshing"] = True
+        return cached
+    if not force:
+        news_items = _fetch_news_items()
+        payload = _fallback_intelligence(status, ohlcv, news_items, "local AI refresh starting in background")
+        now = datetime.now(timezone.utc)
+        payload["generatedAtUtc"] = now.isoformat()
+        payload["nextRefreshAtUtc"] = datetime.fromtimestamp(now.timestamp() + INTELLIGENCE_REFRESH_SECONDS, timezone.utc).isoformat()
+        payload["rawNews"] = news_items
+        payload["refreshing"] = True
+        _start_background_refresh()
+        return payload
+    return refresh_intelligence(state, status, ohlcv)
 
 
-if __name__ == "__main__":
+def _render_server_chart_svg(rows: list[dict], live_price: float | None) -> str:
+    rows = merge_live_price_into_ohlcv(rows[-180:], live_price)
+    if not rows:
+        return '<div class="server-chart-fallback"></div>'
+    width, height = 1200, 520
+    pad_l, pad_r, pad_t, pad_b = 48, 78, 28, 58
+    price_h = 380
+    chart_w = width - pad_l - pad_r
+    highs = [float(r.get("high") or 0) for r in rows]
+    lows = [float(r.get("low") or 0) for r in rows]
+    vols = [float(r.get("volumeUsdt") or 0) for r in rows]
+    max_p, min_p = max(highs), min(lows)
+    span_p = max(1e-9, max_p - min_p)
+    max_v = max(max(vols), 1)
+
+    def x_for(i: int) -> float:
+        return pad_l + (chart_w * i / max(1, len(rows) - 1))
+
+    def y_for(price: float) -> float:
+        return pad_t + ((max_p - price) / span_p) * (price_h - pad_t)
+
+    bands = []
+    band_w = chart_w / 3
+    for i, (label, color, text_color) in enumerate([
+        ("DISTRIBUTION", "#fff3ee", "#d54545"),
+        ("RANGE CONSOLIDATION", "#eef6ff", "#1767c2"),
+        ("ACCUMULATION", "#f1fbf4", "#0d8a2f"),
+    ]):
+        x = pad_l + (band_w * i)
+        bands.append(f'<rect x="{x:.1f}" y="{pad_t}" width="{band_w:.1f}" height="{price_h-pad_t}" fill="{color}"/>')
+        bands.append(f'<text x="{x + band_w/2:.1f}" y="{pad_t+28}" text-anchor="middle" font-size="13" font-weight="800" fill="{text_color}">{label}</text>')
+    grid = []
+    for i in range(6):
+        y = pad_t + ((price_h - pad_t) * i / 5)
+        price = max_p - ((max_p - min_p) * i / 5)
+        grid.append(f'<line x1="{pad_l}" y1="{y:.1f}" x2="{width-pad_r}" y2="{y:.1f}" stroke="#ded8cc" stroke-width="1"/>')
+        grid.append(f'<text x="{width-pad_r+12}" y="{y+4:.1f}" font-size="13" fill="#706d64">{_fmt_num(price, 0)}</text>')
+    line_pts = " ".join(f"{x_for(i):.1f},{y_for(float(r.get('close') or 0)):.1f}" for i, r in enumerate(rows))
+    candles = []
+    candle_w = max(2.0, chart_w / max(1, len(rows)) * 0.55)
+    for i, r in enumerate(rows):
+        x = x_for(i)
+        open_p = float(r.get("open") or 0)
+        close_p = float(r.get("close") or 0)
+        high_p = float(r.get("high") or 0)
+        low_p = float(r.get("low") or 0)
+        color = "#4dbb92" if close_p >= open_p else "#33302a"
+        y_high, y_low = y_for(high_p), y_for(low_p)
+        y_open, y_close = y_for(open_p), y_for(close_p)
+        body_y = min(y_open, y_close)
+        body_h = max(2.0, abs(y_close - y_open))
+        vol_h = (float(r.get("volumeUsdt") or 0) / max_v) * 76
+        candles.append(f'<line x1="{x:.1f}" y1="{y_high:.1f}" x2="{x:.1f}" y2="{y_low:.1f}" stroke="{color}" stroke-width="1"/>')
+        candles.append(f'<rect x="{x-candle_w/2:.1f}" y="{body_y:.1f}" width="{candle_w:.1f}" height="{body_h:.1f}" fill="{color}" opacity="0.88"/>')
+        candles.append(f'<rect x="{x-candle_w/2:.1f}" y="{height-pad_b-vol_h:.1f}" width="{candle_w:.1f}" height="{vol_h:.1f}" fill="{color}" opacity="0.34"/>')
+    latest = rows[-1]
+    latest_price = float(latest.get("close") or 0)
+    latest_y = y_for(latest_price)
+    return (
+        '<div class="server-chart-fallback">'
+        f'<svg viewBox="0 0 {width} {height}" role="img" aria-label="BTC price chart">'
+        '<rect width="1200" height="520" fill="#fffdf8"/>'
+        + "".join(bands)
+        + "".join(grid)
+        + "".join(candles)
+        + f'<polyline points="{line_pts}" fill="none" stroke="#f7931a" stroke-width="3"/>'
+        + f'<line x1="{pad_l}" y1="{latest_y:.1f}" x2="{width-pad_r}" y2="{latest_y:.1f}" stroke="#f7931a" stroke-dasharray="4 5" opacity="0.55"/>'
+        + f'<rect x="{width-pad_r-2}" y="{latest_y-15:.1f}" width="74" height="30" rx="6" fill="#f7931a"/><text x="{width-pad_r+35}" y="{latest_y+5:.1f}" text-anchor="middle" font-size="13" font-weight="800" fill="#fff">{_fmt_num(latest_price, 0)}</text>'
+        + '</svg></div>'
+    )
+
+
+def _render_server_events(events: list[dict]) -> str:
+    rows = list(reversed(events or []))[:8]
+    if not rows:
+        return '<tr><td colspan="4">No events yet</td></tr>'
+    out = []
+    for ev in rows:
+        out.append(
+            "<tr>"
+            f"<td>{html_lib.escape(str(ev.get('tsUtc') or '--'))}</td>"
+            f"<td>{html_lib.escape(str(ev.get('event') or '--'))}</td>"
+            f"<td>{_fmt_num(ev.get('price'), 2)}</td>"
+            f"<td>{_fmt_num(ev.get('qtyBtc'), 6)}</td>"
+            "</tr>"
+        )
+    return "".join(out)
+
+
+def _render_server_orders(orders: list[dict], price: float) -> str:
+    rows = (orders or [])[:12]
+    if not rows:
+        return '<tr><td colspan="6">No open orders</td></tr>'
+    out = []
+    for order in rows:
+        order_price = float(order.get("price") or 0)
+        total = float(order.get("total") or (float(order.get("qty_btc") or 0) * order_price))
+        side = str(order.get("side") or "--")
+        rel = "--"
+        if price > 0 and order_price > 0:
+            delta = abs((order_price / price) - 1)
+            rel = ("Below" if order_price < price else "Above") + f" market {_fmt_pct(delta)}"
+        out.append(
+            "<tr>"
+            f'<td class="order-side {side.lower()}">{html_lib.escape(side)}</td>'
+            f"<td>{_fmt_num(order_price, 2)}</td>"
+            f"<td>{html_lib.escape(rel)}</td>"
+            f"<td>{_fmt_num(order.get('qty_btc'), 6)}</td>"
+            f"<td>{_fmt_money(total)}</td>"
+            f"<td>{html_lib.escape(str(order.get('type') or 'LIMIT'))}</td>"
+            "</tr>"
+        )
+    return "".join(out)
+
+
+def _render_server_config(state: dict) -> str:
+    preferred = [
+        "symbol", "interval", "feeBps", "gridMode", "gridLevels", "gridSpacingPct", "gridMaxExposurePct",
+        "riskPerTradePct", "positionCapPct", "maxDailyLossPct", "aiEnabled", "aiProvider", "aiBaseUrl",
+        "aiModel", "aiMinConfidence", "aiPollSeconds", "allowLiveOrders", "paused",
+    ]
+    keys = [k for k in preferred if k in state] + [k for k in sorted(state.keys()) if k not in preferred]
+    fields = []
+    for key in keys:
+        value = state.get(key)
+        fields.append(
+            '<div class="config-field">'
+            f'<label for="cfg-{html_lib.escape(str(key))}">{html_lib.escape(str(key))}</label>'
+            f'<input id="cfg-{html_lib.escape(str(key))}" data-key="{html_lib.escape(str(key))}" type="text" value="{html_lib.escape(str(value))}">'
+            '</div>'
+        )
+    return "".join(fields)
+
+
+def _render_impact_bars(level, color: str = "orange", size: int = 8) -> str:
+    try:
+        level_i = max(0, min(size, int(float(level))))
+    except Exception:
+        level_i = 3
+    cls = "green" if color == "green" else "orange"
+    return '<div class="impact-bars">' + "".join(f'<span class="{"on " + cls if i < level_i else ""}"></span>' for i in range(size)) + "</div>"
+
+
+def _render_server_news(intelligence: dict) -> str:
+    cards = intelligence.get("newsCards") or []
+    out = []
+    for card in cards[:4]:
+        sentiment = str(card.get("sentiment") or "Neutral")
+        color = "green" if sentiment.lower() == "bullish" else "orange"
+        title = html_lib.escape(str(card.get("title") or "Crypto market update"))
+        source = html_lib.escape(str(card.get("source") or "Local AI"))
+        age = html_lib.escape(str(card.get("age") or "30m refresh"))
+        url = html_lib.escape(str(card.get("url") or ""))
+        title_html = f'<a href="{url}" target="_blank" rel="noreferrer">{title}</a>' if url else title
+        out.append(
+            '<div class="news-card">'
+            f'<div class="news-title">{title_html}</div>'
+            f'<div class="news-row"><div><span class="source-chip">{source}</span> <span class="news-meta">{age}</span></div>'
+            f'<span class="sentiment-chip {"bullish" if color == "green" else "neutral"}">{html_lib.escape(sentiment)}</span></div>'
+            '<div class="news-meta" style="margin-bottom:6px">Impact</div>'
+            f'{_render_impact_bars(card.get("impact", 4), color)}'
+            '</div>'
+        )
+    return "".join(out)
+
+
+def _render_server_signals(intelligence: dict) -> str:
+    rows = intelligence.get("regimeSignals") or []
+    out = ['<div class="signal-row header"><div>Signal</div><div>Status</div><div>Trend</div><div>Notes</div></div>']
+    for row in rows[:8]:
+        tone = str(row.get("tone") or "orange")
+        chip = "good" if tone == "green" else "warn"
+        color = "var(--green)" if tone == "green" else ("var(--blue)" if tone == "blue" else "var(--btc)")
+        out.append(
+            '<div class="signal-row">'
+            f'<strong>{html_lib.escape(str(row.get("signal") or "--"))}</strong>'
+            f'<span class="status-chip {chip}">{html_lib.escape(str(row.get("status") or "--"))}</span>'
+            f'<span class="spark" style="color:{color}"></span>'
+            f'<span>{html_lib.escape(str(row.get("note") or ""))}</span>'
+            '</div>'
+        )
+    return "".join(out)
+
+
+def render_initial_dashboard_html(interval_override: str | None = None) -> str:
+    status = read_json(STATUS_PATH)
+    state = read_json(STATE_PATH)
+    runtime = read_json(RUNTIME_PATH)
+    cumulative = read_json(CUM_PATH)
+    events = read_events()
+    symbol = status.get("symbol") or state.get("symbol", "BTCUSDT")
+    interval = normalize_interval(interval_override or status.get("interval") or state.get("interval", "1m"))
+    ohlcv = get_ohlcv(symbol, interval, limit=SUPPORTED_INTERVALS[interval]["default_limit"], offset=0)
+    ohlcv = apply_status_price_to_ohlcv(ohlcv, status, interval)
+    status = apply_market_price_to_status(status, latest_ohlcv_price(ohlcv))
+    intelligence = get_intelligence(state, status, ohlcv)
+    orders = ((runtime.get("grid") or {}).get("orders") or [])
+    position = status.get("position") or {}
+    equity = float(status.get("equityUsdt") or 0.0)
+    price = float(status.get("price") or 0.0)
+    btc_value = float(status.get("btc") or 0.0) * price
+    exposure = (btc_value / equity) if equity > 0 else 0.0
+    realized = float(cumulative.get("realizedPnlUsdt") or 0.0)
+    unreal = float(position.get("unrealizedPnlUsdt") or 0.0)
+    fees = float(cumulative.get("feesPaidUsdt") or 0.0)
+    freshness = freshness_seconds(status.get("tsUtc"))
+    fresh_label = f"Live payload - {freshness:.2f}s" if freshness is not None else "No timestamp"
+    state_label = "PAUSED" if state.get("paused") else ("LIVE / AI-GATED" if state.get("aiEnabled", True) else "LIVE / GRID")
+    risk = "High" if exposure > 0.85 else ("Normal" if exposure > 0.55 else "Light")
+    mode = f"{state.get('gridMode') or 'grid'} + {'Local AI' if state.get('aiEnabled', True) else 'Rules'}"
+    metrics_html = "".join(
+        f'<div class="metric" data-summary-key="{key}"><div class="label">{label}</div><div class="value {cls}" id="summary-{key}">{value}</div></div>'
+        for key, label, value, cls in [
+            ("equity", "Total Equity", _fmt_money(equity), ""),
+            ("realized", "Current Net PnL", _fmt_money(realized), _signed_class(realized)),
+            ("unrealized", "Unrealized Net PnL", _fmt_money(unreal), _signed_class(unreal)),
+            ("fees", "Total Fees Paid", _fmt_money(fees), "negative" if fees > 0 else ""),
+        ]
+    )
+    news_html = _render_server_news(intelligence)
+    signal_html = _render_server_signals(intelligence)
+    final_regime = intelligence.get("finalRegime") or {}
+    calendar_html = (
+        '<div class="calendar-row"><div class="calendar-icon" style="background:#1767c2">1</div><strong>ISM Manufacturing</strong><span class="calendar-meta">May 1<br>14:00 UTC</span><div><div class="calendar-meta" style="margin-bottom:5px">Impact</div><div class="impact-dots"><span class="on"></span><span class="on"></span><span class="on"></span></div></div></div>'
+        '<div class="calendar-row"><div class="calendar-icon" style="background:#f7931a">2</div><strong>Fed Speakers</strong><span class="calendar-meta">May 1<br>16:30 UTC</span><div><div class="calendar-meta" style="margin-bottom:5px">Impact</div><div class="impact-dots"><span class="on"></span><span class="on"></span><span></span></div></div></div>'
+        '<div class="calendar-row"><div class="calendar-icon" style="background:#0d8a2f">3</div><strong>Jobs Data (NFP)</strong><span class="calendar-meta">May 8<br>12:30 UTC</span><div><div class="calendar-meta" style="margin-bottom:5px">Impact</div><div class="impact-dots"><span class="on"></span><span class="on"></span><span class="on"></span></div></div></div>'
+        '<div class="calendar-row"><div class="calendar-icon" style="background:#d54545">4</div><strong>CPI Watch</strong><span class="calendar-meta">May 12<br>12:30 UTC</span><div><div class="calendar-meta" style="margin-bottom:5px">Impact</div><div class="impact-dots"><span class="on"></span><span class="on"></span><span class="on"></span></div></div></div>'
+        '<div class="calendar-row"><div class="calendar-icon" style="background:#13a7b4">5</div><strong>PCE Drift</strong><span class="calendar-meta">May 28<br>12:30 UTC</span><div><div class="calendar-meta" style="margin-bottom:5px">Impact</div><div class="impact-dots"><span class="on"></span><span class="on"></span><span></span></div></div></div>'
+    )
+    status_html = "".join(
+        f'<div class="kv"><div class="k">{label}</div><div class="v">{html_lib.escape(str(value))}</div></div>'
+        for label, value in [
+            ("Status timestamp", status.get("tsUtc") or "--"),
+            ("Runtime saved", runtime.get("savedAt") or "--"),
+            ("Grid status", "Active" if ((runtime.get("grid") or {}).get("orders") or []) else "Idle"),
+            ("AI model", (status.get("stats") or {}).get("ai", {}).get("model") or state.get("aiModel") or "--"),
+        ]
+    )
+    timeframe_html = "".join(
+        f'<a class="btn {"active-timeframe" if key == interval else ""}" href="/?interval={html_lib.escape(key)}">{html_lib.escape(meta["label"])}</a>'
+        for key, meta in SUPPORTED_INTERVALS.items()
+    )
+    final_title = html_lib.escape(str(final_regime.get("title") or "Range Consolidation"))
+    final_copy = html_lib.escape(str(final_regime.get("copy") or "Choppy price action within established range. Maintain grid discipline and capital efficiency."))
+    generated = intelligence.get("generatedAtUtc") or ""
+    next_refresh = intelligence.get("nextRefreshAtUtc") or ""
+    intel_note = f'{html_lib.escape(str(intelligence.get("source") or "local"))} - next {html_lib.escape(str(next_refresh)[11:16] or "30m")}'
+    page = HTML
+    replacements = {
+        'id="fresh-label">Waiting for data</span>': f'id="fresh-label">{html_lib.escape(fresh_label)}</span>',
+        'id="server-time">--</span>': f'id="server-time">{html_lib.escape(datetime.now(timezone.utc).strftime("%H:%M:%S"))}</span>',
+        '<button class="btn" type="button" id="top-timeframe">1m</button>': f'<a class="btn" id="top-timeframe" href="/?interval={html_lib.escape(interval)}">{html_lib.escape(SUPPORTED_INTERVALS[interval]["label"])}</a>',
+        'id="trading-state-label">LIVE / AI-GATED</div>': f'id="trading-state-label">{html_lib.escape(state_label)}</div>',
+        'id="sticky-summary"></div>': f'id="sticky-summary">{metrics_html}</div>',
+        'id="state-mode">Grid + Local AI</strong>': f'id="state-mode">{html_lib.escape(mode)}</strong>',
+        'id="state-risk" class="positive">Normal</strong>': f'id="state-risk" class="{_signed_class(1 if risk != "High" else -1)}">{html_lib.escape(risk)}</strong>',
+        'id="state-exposure">--</strong>': f'id="state-exposure">{_fmt_pct(exposure)}</strong>',
+        '<h2>BTC/USD · 1H · INDEX</h2>': f'<h2>BTC/USD · {html_lib.escape(SUPPORTED_INTERVALS[interval]["label"])} · INDEX</h2>',
+        'id="chart-price-pill"><span class="label">BTC Price</span><span>--</span></div>': f'id="chart-price-pill"><span class="label">BTC Price</span><span>{_fmt_num(price, 2)}</span></div>',
+        '<div class="pillrow" id="timeframe-controls" style="margin-bottom:10px"></div>': f'<div class="pillrow" id="timeframe-controls" style="margin-bottom:10px">{timeframe_html}</div>',
+        '<canvas id="market-chart"></canvas>': f'<canvas id="market-chart"></canvas>{_render_server_chart_svg(ohlcv, price)}',
+        'id="latest-candle"><strong>Live candle</strong><span>--</span></div>': f'id="latest-candle"><strong>Live candle</strong><span>C {_fmt_num(price, 2)}</span></div>',
+        '<tbody id="events-body"></tbody>': f'<tbody id="events-body">{_render_server_events(events)}</tbody>',
+        '<tbody id="orders-body"></tbody>': f'<tbody id="orders-body">{_render_server_orders(orders, price)}</tbody>',
+        '<div class="config-grid" id="config-form-grid"></div>': f'<div class="config-grid" id="config-form-grid">{_render_server_config(state)}</div>',
+        'id="news-stack"></div>': f'id="news-stack">{news_html}</div>',
+        '<span class="footer-note">View All</span>': f'<span class="footer-note">{intel_note}</span>',
+        'id="signal-table"></div>': f'id="signal-table">{signal_html}</div>',
+        'id="regime-updated">live</span>': f'id="regime-updated">AI refresh {html_lib.escape(str(generated)[11:16] or "now")}</span>',
+        'id="final-regime-title">Range Consolidation</div>': f'id="final-regime-title">{final_title}</div>',
+        'id="final-regime-copy">Choppy price action within established range. Maintain grid discipline and capital efficiency.</div>': f'id="final-regime-copy">{final_copy}</div>',
+        'id="macro-calendar"></div>': f'id="macro-calendar">{calendar_html}</div>',
+        'id="status-list"></div>': f'id="status-list">{status_html}</div>',
+    }
+    for old, new in replacements.items():
+        page = page.replace(old, new)
+    return page
+
+
+def build_market_payload(qs: dict[str, list[str]]) -> dict:
+    status = read_json(STATUS_PATH)
+    state = read_json(STATE_PATH)
+    runtime = read_json(RUNTIME_PATH)
+    cumulative = read_json(CUM_PATH)
+    symbol = status.get('symbol') or state.get('symbol', 'BTCUSDT')
+    requested_interval = normalize_interval(qs.get('interval', [status.get('interval') or state.get('interval', '1m')])[0])
+    raw_limit = qs.get('limit', [SUPPORTED_INTERVALS[requested_interval]['default_limit']])[0]
+    raw_offset = qs.get('offset', [0])[0]
+    try:
+        limit = max(30, min(MAX_OHLCV_LIMIT, int(raw_limit)))
+    except Exception:
+        limit = SUPPORTED_INTERVALS[requested_interval]['default_limit']
+    try:
+        offset = max(0, int(raw_offset))
+    except Exception:
+        offset = 0
+    include_ohlcv = qs.get('ohlcv', ['1'])[0] not in {'0', 'false', 'no'}
+    ohlcv = get_ohlcv(symbol, requested_interval, limit=limit, offset=offset) if include_ohlcv else []
+    if include_ohlcv:
+        ohlcv = apply_status_price_to_ohlcv(ohlcv, status, requested_interval)
+    status_payload = apply_market_price_to_status(status, latest_ohlcv_price(ohlcv))
+    state_payload = dict(state)
+    state_payload['aiEndpointKey'] = infer_ai_endpoint_key(state)
+    ai_endpoint = AI_ENDPOINT_BY_KEY.get(state_payload['aiEndpointKey']) or AI_ENDPOINT_BY_KEY['custom']
+    payload = {
+        'schemaVersion': DASHBOARD_SCHEMA_VERSION,
+        'serverInstanceId': SERVER_INSTANCE_ID,
+        'channel': 'status',
+        'seq': next_sequence('status'),
+        'status': status_payload,
+        'state': state_payload,
+        'runtime': runtime,
+        'cumulative': cumulative,
+        'events': read_events(),
+        'ohlcv': ohlcv,
+        'chartInterval': requested_interval,
+        'chartLimit': limit,
+        'chartOffset': offset,
+        'supportedIntervals': list(SUPPORTED_INTERVALS.keys()),
+        'aiEndpointKey': ai_endpoint['key'],
+        'aiEndpointLabel': ai_endpoint['label'],
+        'freshnessSeconds': freshness_seconds(status.get('tsUtc')),
+        'serverTimeUtc': datetime.now(timezone.utc).isoformat(),
+        'refreshMs': REFRESH_MS,
+    }
+    return validate_market_payload(payload)
+
+
+def build_chart_tick_payload(qs: dict[str, list[str]]) -> dict:
+    status = read_json(STATUS_PATH)
+    state = read_json(STATE_PATH)
+    symbol = status.get('symbol') or state.get('symbol', 'BTCUSDT')
+    requested_interval = normalize_interval(qs.get('interval', [status.get('interval') or state.get('interval', '1m')])[0])
+    ohlcv = get_ohlcv(symbol, requested_interval, limit=1, offset=0)
+    ohlcv = apply_status_price_to_ohlcv(ohlcv, status, requested_interval)
+    status_payload = apply_market_price_to_status(status, latest_ohlcv_price(ohlcv))
+    payload = {
+        'schemaVersion': DASHBOARD_SCHEMA_VERSION,
+        'serverInstanceId': SERVER_INSTANCE_ID,
+        'channel': 'chart',
+        'seq': next_sequence('chart'),
+        'serverTimeUtc': datetime.now(timezone.utc).isoformat(),
+        'chartInterval': requested_interval,
+        'bar': ohlcv[-1] if ohlcv else None,
+        'status': status_payload,
+        'freshnessSeconds': freshness_seconds(status.get('tsUtc')),
+        'refreshMs': REFRESH_MS,
+    }
+    return validate_chart_tick_payload(payload)
+
+
+from dashboard_routes import Handler
+
+
+if __name__ == '__main__':
     server = ThreadingHTTPServer((HOST, PORT), Handler)
-    print(f"Dashboard listening on http://{HOST}:{PORT}", flush=True)
+    print(f'Dashboard listening on http://{HOST}:{PORT}', flush=True)
     server.serve_forever()
