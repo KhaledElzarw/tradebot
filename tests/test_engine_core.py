@@ -64,6 +64,118 @@ def test_fill_order_paper_sell_allocates_cost_basis():
     assert round(grid.cost_basis_usdt, 4) == 60.0
 
 
+def test_normalize_cumulative_derives_realized_and_coerces_counts():
+    result = engine._normalize_cumulative(
+        {
+            "sinceUtc": "2026-01-01T00:00:00+00:00",
+            "grossRealizedPnlUsdt": "10.5",
+            "feesPaidUsdt": "0.5",
+            "trades": "3",
+            "wins": None,
+            "losses": "1",
+        }
+    )
+
+    assert result["realizedPnlUsdt"] == 10.0
+    assert result["trades"] == 3
+    assert result["wins"] == 0
+    assert result["losses"] == 1
+
+
+def test_grid_serialization_round_trips_trailing_fields():
+    grid = engine.GridState(
+        anchor=100.0,
+        spacing_pct=0.01,
+        levels=2,
+        max_exposure_pct=0.35,
+        reserved_usdt=50.0,
+        reserved_btc=0.1,
+        cost_basis_usdt=25.0,
+        orders=[engine.GridOrder(side="BUY", price=99.0, qty_btc=0.01)],
+        active=True,
+        last_recenter_utc="2026-01-01T00:00:00+00:00",
+    )
+    grid.__dict__["trail_armed"] = True
+    grid.__dict__["trail_stop"] = 95.5
+
+    payload = engine._serialize_grid(grid)
+    restored = engine._deserialize_grid(payload)
+
+    assert engine._serialize_grid(None) is None
+    assert engine._deserialize_grid(None) is None
+    assert restored == grid
+    assert restored.__dict__["trail_armed"] is True
+    assert restored.__dict__["trail_stop"] == 95.5
+
+
+def test_snapshot_signature_and_rounding_are_stable():
+    assert engine._stable_signature({"b": 2, "a": 1}) == '{"a":1,"b":2}'
+    assert engine._round_snapshot_value(
+        {"b": {"x": 2.34567}, "a": (1.23456, True, None)},
+        4,
+    ) == {"a": [1.2346, True, None], "b": {"x": 2.3457}}
+
+
+def test_market_movement_helpers_cover_threshold_edges():
+    assert engine._relative_bps_moved(None, None, 5) is False
+    assert engine._relative_bps_moved(None, 1, 5) is True
+    assert engine._relative_bps_moved(100.0, 100.04, 5) is False
+    assert engine._relative_bps_moved(100.0, 100.2, 5) is True
+    assert engine._relative_bps_moved(1.0, 1.0, 0) is False
+    assert engine._relative_bps_moved(1.0, 1.01, 0) is True
+    assert engine._market_values_moved({"price": 100.0}, {"price": 100.01}, 5) is False
+    assert engine._market_values_moved({"price": 100.0}, {"other": 100.0}, 5) is True
+
+
+def test_snapshot_gate_force_market_window_and_record_copy():
+    gate = engine._SnapshotChangeGate(10, 60, 5)
+    first = gate.evaluate(
+        critical_signature="a",
+        market_signature="w1",
+        market_values={"price": 100.0},
+        now_monotonic=0.0,
+    )
+    gate.record(first)
+    first.market_values["price"] = 999.0
+
+    assert gate.last_market_values == {"price": 100.0}
+
+    forced = gate.evaluate(
+        critical_signature="a",
+        market_signature="w1",
+        force=True,
+        now_monotonic=1.0,
+    )
+    assert forced.should_persist is True
+    assert forced.reason == "forced"
+
+    window_changed = gate.evaluate(
+        critical_signature="a",
+        market_signature="w2",
+        market_values={"price": 100.0},
+        now_monotonic=10.0,
+    )
+    assert window_changed.should_persist is True
+    assert window_changed.reason == "market_window_changed"
+
+
+def test_ai_control_signature_filters_and_rounds_stable_fields():
+    signature = engine._ai_control_signature(
+        {
+            "enabled": True,
+            "confidence": 0.123456789,
+            "riskBudgetPct": 0.987654321,
+            "promptVersion": "ignored",
+        }
+    )
+
+    assert signature == {
+        "enabled": True,
+        "confidence": 0.12345679,
+        "riskBudgetPct": 0.98765432,
+    }
+
+
 def test_reconcile_accounting_from_trade_log(tmp_path, monkeypatch):
     trades = tmp_path / "trades.jsonl"
     rows = [
