@@ -5,6 +5,8 @@ import sys
 import time
 from pathlib import Path
 
+import wrapper_runner
+
 BASE = Path(__file__).resolve().parent
 PID_PATH = BASE / 'engine.pid'
 LOG_PATH = BASE / 'engine.nohup.out'
@@ -13,7 +15,7 @@ ENGINE = str(BASE / 'engine.py')
 
 
 def get_python_executable() -> str:
-    return os.getenv("TRADEBOT_PYTHON") or PYTHON
+    return wrapper_runner.get_python_executable(PYTHON)
 
 
 def _live_engine_pids():
@@ -73,27 +75,17 @@ def _stop_pid(pid: int, timeout: float = 5.0) -> None:
 
 
 def _start_fresh_detached() -> int:
-    log = open(LOG_PATH, 'ab', buffering=0)
-    proc = subprocess.Popen(
-        [get_python_executable(), ENGINE],
-        cwd=str(BASE),
-        stdin=subprocess.DEVNULL,
-        stdout=log,
-        stderr=subprocess.STDOUT,
-        start_new_session=True,
-        close_fds=True,
-        env=os.environ.copy(),
-    )
+    proc_pid = wrapper_runner.start_detached(get_python_executable(), ENGINE, BASE, LOG_PATH)
     deadline = time.time() + 5.0
     while time.time() < deadline:
         detached = _detached_engine_pids()
         if detached:
             pid = max(detached)
-            PID_PATH.write_text(str(pid))
+            wrapper_runner.write_pid(PID_PATH, pid)
             return pid
         time.sleep(0.1)
-    PID_PATH.write_text(str(proc.pid))
-    return proc.pid
+    wrapper_runner.write_pid(PID_PATH, proc_pid)
+    return proc_pid
 
 
 def start() -> int:
@@ -103,7 +95,7 @@ def start() -> int:
         for other in live:
             if other != pid:
                 _stop_pid(other)
-        PID_PATH.write_text(str(pid))
+        wrapper_runner.write_pid(PID_PATH, pid)
         return pid
 
     return _start_fresh_detached()
@@ -112,8 +104,7 @@ def start() -> int:
 def stop() -> None:
     for pid in _all_engine_pids():
         _stop_pid(pid)
-    if PID_PATH.exists():
-        PID_PATH.unlink()
+    wrapper_runner.unlink_pid(PID_PATH)
 
 
 def restart() -> int:

@@ -5,6 +5,8 @@ import sys
 import time
 from pathlib import Path
 
+import wrapper_runner
+
 BASE = Path(__file__).resolve().parent
 PID_PATH = BASE / 'dashboard.pid'
 LOG_PATH = BASE / 'dashboard.nohup.out'
@@ -14,7 +16,7 @@ PORT = 8844
 
 
 def get_python_executable() -> str:
-    return os.getenv("TRADEBOT_PYTHON") or PYTHON
+    return wrapper_runner.get_python_executable(PYTHON)
 
 
 def _live_dashboard_pids():
@@ -72,19 +74,9 @@ def _listening_pid_on_port() -> int | None:
 
 
 def _start_detached() -> int:
-    with open(LOG_PATH, 'ab', buffering=0) as log:
-        proc = subprocess.Popen(
-            [get_python_executable(), DASHBOARD],
-            cwd=str(BASE),
-            stdin=subprocess.DEVNULL,
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-            close_fds=True,
-            env=os.environ.copy(),
-        )
-    PID_PATH.write_text(str(proc.pid))
-    return proc.pid
+    pid = wrapper_runner.start_detached(get_python_executable(), DASHBOARD, BASE, LOG_PATH)
+    wrapper_runner.write_pid(PID_PATH, pid)
+    return pid
 
 
 def start() -> int:
@@ -97,7 +89,7 @@ def start() -> int:
         for pid in sorted(set(live)):
             if pid != newest:
                 _stop_pid(pid)
-        PID_PATH.write_text(str(newest))
+        wrapper_runner.write_pid(PID_PATH, newest)
         return newest
     return _start_detached()
 
@@ -109,8 +101,7 @@ def stop() -> None:
         live.append(port_pid)
     for pid in sorted(set(live)):
         _stop_pid(pid)
-    if PID_PATH.exists():
-        PID_PATH.unlink()
+    wrapper_runner.unlink_pid(PID_PATH)
 
 
 def restart() -> int:

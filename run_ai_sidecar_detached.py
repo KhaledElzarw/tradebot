@@ -3,6 +3,8 @@ import signal
 import subprocess
 from pathlib import Path
 
+import wrapper_runner
+
 BASE = Path(__file__).resolve().parent
 PID_PATH = BASE / 'ai_sidecar.pid'
 LOG_PATH = BASE / 'ai_sidecar.nohup.out'
@@ -11,7 +13,7 @@ SIDECAR = str(BASE / 'ai_sidecar.py')
 
 
 def get_python_executable() -> str:
-    return os.getenv("TRADEBOT_PYTHON") or PYTHON
+    return wrapper_runner.get_python_executable(PYTHON)
 
 
 def _live_pids():
@@ -37,28 +39,17 @@ def start() -> int:
         for pid in live:
             if pid != newest:
                 _stop_pid(pid)
-        PID_PATH.write_text(str(newest))
+        wrapper_runner.write_pid(PID_PATH, newest)
         return newest
-    log = open(LOG_PATH, 'ab', buffering=0)
-    proc = subprocess.Popen(
-        [get_python_executable(), SIDECAR],
-        cwd=str(BASE),
-        stdin=subprocess.DEVNULL,
-        stdout=log,
-        stderr=subprocess.STDOUT,
-        start_new_session=True,
-        close_fds=True,
-        env=os.environ.copy(),
-    )
-    PID_PATH.write_text(str(proc.pid))
-    return proc.pid
+    pid = wrapper_runner.start_detached(get_python_executable(), SIDECAR, BASE, LOG_PATH)
+    wrapper_runner.write_pid(PID_PATH, pid)
+    return pid
 
 
 def stop() -> None:
     for pid in _live_pids():
         _stop_pid(pid)
-    if PID_PATH.exists():
-        PID_PATH.unlink()
+    wrapper_runner.unlink_pid(PID_PATH)
 
 
 def restart() -> int:
