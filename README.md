@@ -3,8 +3,8 @@
 ## Project overview
 
 `tradebot` is a Python trading-bot workspace for Binance Spot testnet-style
-workflows, local SQLite-backed runtime storage, dashboard monitoring, Telegram
-controls, and optional local AI review.
+workflows, local SQLite-backed runtime storage, dashboard monitoring, optional
+Telegram notifications, and optional local AI review.
 
 This repository is organized for cautious modernization. The current focus is
 making setup, safety, testing, and runtime boundaries clear before larger
@@ -52,11 +52,12 @@ dashboard is not localhost-only.
 using an OpenAI-compatible local endpoint. AI output is advisory unless existing
 engine configuration explicitly consumes it.
 
-### Telegram control bot
+### Optional Telegram notifications
 
-`control_bot.py` provides Telegram operator controls and status summaries for
-approved users. Telegram tokens and admin identifiers belong in local
-environment files or deployment secret storage only.
+Retained engine, advisor, and trend notification helpers can send Telegram
+messages when `TELEGRAM_CONTROL_BOT_TOKEN` and local runtime state provide a
+destination chat. The deprecated Telegram control bot has been removed; broader
+notification cleanup is deferred to a later branch.
 
 ## Requirements
 
@@ -65,8 +66,8 @@ environment files or deployment secret storage only.
 - Git.
 - Network access for dependency installation.
 - Optional local services depending on what you run: Binance testnet access,
-  Telegram bot access, dashboard access, and an Ollama/OpenAI-compatible local
-  AI endpoint.
+  Telegram notification delivery, dashboard access, and an
+  Ollama/OpenAI-compatible local AI endpoint.
 
 ## Setup
 
@@ -105,7 +106,7 @@ blank.
 Review the sections in `.env.example` before running services:
 
 - Binance/testnet configuration.
-- Telegram control bot configuration.
+- Optional Telegram notification configuration.
 - Persistence/runtime storage.
 - Dashboard configuration.
 - Local AI sidecar configuration.
@@ -166,7 +167,6 @@ Run individual components directly only when debugging:
 ```bash
 python engine.py
 python dashboard_server.py
-python control_bot.py
 python ai_sidecar.py
 ```
 
@@ -227,7 +227,6 @@ For the full source-vs-runtime policy and future runtime layout guidance, see
 |-- dashboard_server.py            # Dashboard server
 |-- dashboard_routes.py            # Dashboard route helpers
 |-- dashboard/                     # Dashboard static assets
-|-- control_bot.py                 # Telegram control bot
 |-- ai_sidecar.py                  # Optional AI sidecar
 |-- ai_playground.py               # One-off AI review helper
 |-- dashboard_orchestrator.py      # Local service orchestrator

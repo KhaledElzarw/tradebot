@@ -19,7 +19,7 @@ execution changes, or engine main loop changes.
 | Workflow | Files | Current status | Removal phase |
 |---|---|---|---|
 | Research replay scripts | Removed: `grid_engine_honest.py`, `grid_engine_honest_v2.py` | Removed deprecated research/backtest scripts; generated replay JSON outputs remain ignored as legacy local artifacts | Complete |
-| Telegram control bot | `control_bot.py` | Deprecated legacy operator control surface; retained for compatibility | Phase 2 after operator/service-manager confirmation |
+| Telegram control bot | Removed: `control_bot.py` | Removed deprecated operator control surface; optional notification helpers remain for later ownership cleanup | Complete |
 | Baserow tooling | Removed: `baserow_sync.py`, `migrate_to_baserow.py`, `clean_baserow_tradebot_db.py`, `prune_tradebot_order_grid_rows.py` | Removed legacy sync/export/cleanup tooling; no supported Baserow env settings remain | Complete |
 | Alternate trend engine | `engine_trend.py` | Deprecated alternate engine workflow; retained until manual usage is confirmed absent | Phase 3 |
 | Advisor/flexy workflow | `advisor.py`, `gridMode=flexy` | Deprecated legacy advisor workflow; `flexy` remains active behavior for now | Phase 4 after characterization and explicit behavior-change approval |
@@ -29,19 +29,19 @@ execution changes, or engine main loop changes.
 - Do not remove `migrate_to_sqlite.py`.
 - Do not remove `gridMode=flexy` from `engine.py` or dashboard validation in this
   documentation phase.
-- Do not remove Telegram keys from `.env.example` until tests, docs, and runtime
-  notification ownership are updated together.
+- Do not remove or rename `TELEGRAM_CONTROL_BOT_TOKEN` until runtime
+  notification ownership is updated together.
 - Baserow keys have been removed from `.env.example` with the legacy Baserow
   tooling.
-- Do not remove `python-telegram-bot` from requirements until the Telegram
-  control bot is removed or replaced.
+- `TELEGRAM_ADMIN_USER_ID` and `python-telegram-bot` have been removed with the
+  deprecated Telegram control bot.
 
 ## Suggested Removal Order
 
 1. Research replay scripts have been removed.
 2. Legacy Baserow scripts and their dedicated tests/env docs have been removed.
-3. Confirm and remove Telegram control bot documentation, dependency, and entry
-   point.
+3. Telegram control bot documentation, dependency, and entry point have been
+   removed.
 4. Confirm alternate trend engine is unused, then remove trend-specific docs and
    artifacts.
 5. Characterize current `flexy` behavior, then remove advisor/flexy only in an

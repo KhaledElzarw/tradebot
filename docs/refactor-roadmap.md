@@ -96,7 +96,7 @@ branch explicitly authorizes the work:
 - Runtime persistence semantics.
 - AI decision semantics consumed by the engine.
 - Dashboard mutation/control contract.
-- Telegram operator command behavior.
+- Optional Telegram notification behavior.
 - Runtime file paths.
 - Remaining legacy/research script locations.
 - Migration tool behavior.
@@ -179,7 +179,8 @@ exchange semantics until these tests exist and pass in CI.
 Before moving legacy or research scripts:
 
 - Confirm operator usage with the repository owner or operators.
-- Check docs, shell workflows, service managers, Telegram commands, and imports.
+- Check docs, shell workflows, service managers, notification helpers, and
+  imports.
 - Add characterization tests for any retained behavior.
 - Preserve documented command compatibility or provide an explicit replacement.
 - Keep runtime archives and generated outputs out of Git.
@@ -194,8 +195,8 @@ until their ownership and expected behavior are confirmed.
 Before a `src/` migration:
 
 - Document the intended package structure and import boundaries.
-- Confirm entry points for engine, dashboard, Telegram, AI sidecar, wrappers,
-  smoke checks, and migration commands.
+- Confirm entry points for engine, dashboard, AI sidecar, wrappers, smoke
+  checks, and migration commands.
 - Confirm runtime file path compatibility and operator workflows.
 - Update tests to import through stable package paths.
 - Decide whether root-level compatibility wrappers are required.
