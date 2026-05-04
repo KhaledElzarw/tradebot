@@ -7,7 +7,7 @@ is descriptive, not prescriptive runtime behavior.
 
 The repository is currently organized as a set of root-level Python modules
 that share local runtime files, SQLite persistence, dashboard endpoints,
-Telegram controls, and optional AI review flows.
+optional Telegram notifications, and optional AI review flows.
 
 The main operating shape is:
 
@@ -16,7 +16,8 @@ The main operating shape is:
 - JSON and JSONL files remain compatibility mirrors for legacy/runtime flows.
 - `dashboard_server.py`, `dashboard_routes.py`, and dashboard static assets
   expose monitoring and selected control surfaces.
-- `control_bot.py` exposes Telegram operator controls.
+- Retained engine, advisor, and trend helpers can send optional Telegram
+  notifications through direct HTTPS calls.
 - `ai_sidecar.py` produces optional AI decisions and review context.
 - Wrapper scripts and `dashboard_orchestrator.py` start, stop, and inspect
   local services.
@@ -26,7 +27,6 @@ The main operating shape is:
 - `bot.py`: Binance REST smoke check.
 - `engine.py`: trading engine entry point.
 - `dashboard_server.py`: dashboard server entry point.
-- `control_bot.py`: Telegram control bot entry point.
 - `ai_sidecar.py`: AI sidecar entry point.
 - `ai_playground.py`: one-off AI review helper.
 - `dashboard_orchestrator.py`: grouped service start/stop/status commands.
@@ -128,19 +128,18 @@ AI output must remain advisory unless existing engine configuration explicitly
 uses it. Refactors should not silently change AI enablement, stale-signal
 handling, model selection, prompt semantics, or engine consumption behavior.
 
-## Telegram Control Bot Responsibilities
+## Optional Telegram Notification Responsibilities
 
-The Telegram control bot is responsible for:
+Current Telegram behavior is limited to retained notification helpers in
+`engine.py`, `advisor.py`, and `engine_trend.py`. These helpers are responsible
+for:
 
-- Providing operator commands through Telegram.
-- Reading runtime state and status summaries.
-- Sending pause/resume/panic/configuration commands through existing local
-  control paths.
-- Restricting access to configured admin users.
-- Reporting summaries and recent trade/activity information.
+- Sending selected runtime notifications when `TELEGRAM_CONTROL_BOT_TOKEN` and
+  local runtime state provide a destination chat.
+- Avoiding the `python-telegram-bot` runtime dependency.
+- Remaining unchanged until notification ownership is decided in a later branch.
 
-Telegram tokens and admin identifiers are sensitive local configuration and
-belong outside Git.
+Telegram tokens are sensitive local configuration and belong outside Git.
 
 ## Runtime Artifacts and Where They Should Live
 
@@ -198,7 +197,6 @@ artifacts more clearly. One possible target is:
 |   |-- engine/
 |   |-- dashboard/
 |   |-- ai/
-|   |-- telegram/
 |   |-- persistence/
 |   |-- integrations/
 |   `-- runtime/

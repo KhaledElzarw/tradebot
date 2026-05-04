@@ -8,8 +8,8 @@ logic.
 
 Trading automation is high risk. Start with smoke tests and paper/testnet
 operation before considering any live-risk workflow. Do not treat a successful
-testnet, paper, dry-run, dashboard, Telegram, or AI sidecar workflow as proof
-that live trading is safe.
+testnet, paper, dry-run, dashboard, Telegram notification, or AI sidecar
+workflow as proof that live trading is safe.
 
 Core operating rules:
 
@@ -103,18 +103,11 @@ python ai_playground.py --write-signal
 Run the write-signal command only when you intentionally want to update local AI
 signal runtime state.
 
-### Telegram control bot
+### Optional Telegram notifications
 
-The Telegram control bot provides operator commands through Telegram. Configure
-the bot token and admin user ID in local environment files or deployment secret
-storage only.
-
-Direct debug command:
-
-```bash
-python control_bot.py
-```
-
+Retained engine, advisor, and trend notification helpers can send Telegram
+messages when `TELEGRAM_CONTROL_BOT_TOKEN` and local runtime state provide a
+destination chat. The deprecated Telegram control bot service has been removed.
 Do not commit Telegram tokens, screenshots that reveal tokens, or exported chat
 logs with operational secrets.
 
@@ -135,7 +128,6 @@ Run individual components directly only when debugging:
 ```bash
 python engine.py
 python dashboard_server.py
-python control_bot.py
 python ai_sidecar.py
 ```
 
@@ -175,7 +167,7 @@ curl -s http://localhost:8844/api/dashboard
 Inspect local processes without printing secrets:
 
 ```bash
-ps -ef | grep -E 'engine.py|dashboard_server.py|ai_sidecar.py|control_bot.py'
+ps -ef | grep -E 'engine.py|dashboard_server.py|ai_sidecar.py'
 ```
 
 ## Runtime files
@@ -304,12 +296,12 @@ or paste file contents when the path may contain secrets or runtime state.
 - Check `curl -s http://localhost:8844/api/dashboard`.
 - Review dashboard logs locally without printing secret values.
 
-## Troubleshooting Telegram control bot
+## Troubleshooting Telegram notifications
 
-- Confirm the local environment contains a bot token and admin user ID.
-- Confirm the running process is `control_bot.py`.
+- Confirm the local environment contains `TELEGRAM_CONTROL_BOT_TOKEN` only if
+  notification delivery is expected.
 - Confirm network access to Telegram.
-- Review logs locally without printing token values.
+- Review engine, advisor, or trend logs locally without printing token values.
 - Rotate the bot token if it may have been exposed.
 
 ## Troubleshooting AI sidecar
@@ -348,7 +340,7 @@ Use a conservative upgrade process:
 6. Run `python -m compileall -q .`.
 7. Run `python bot.py` against the intended smoke-test environment.
 8. Start services with `python dashboard_orchestrator.py start`.
-9. Check dashboard, engine, AI sidecar, and Telegram control status.
+9. Check dashboard, engine, and AI sidecar status.
 10. Monitor logs and runtime state before considering any live-risk operation.
 
 ## Removed Baserow path

@@ -13,6 +13,7 @@ been checked.
 Candidate groups:
 
 - Historical or experimental grid engines.
+- Removed Telegram control bot.
 - Trend-specific engine path.
 - Advisor process.
 - Backup files matching `*.bak` or `*.bak_*`.
@@ -73,6 +74,24 @@ Status: **Removed deprecated research/backtest replay script**
    - Compileall.
    - Ruff.
 
+## control_bot.py
+
+Status: **Removed deprecated Telegram operator control surface**
+
+1. Former path: `control_bot.py`
+2. Why removed: Deprecated non-core operator control surface that depended on
+   `python-telegram-bot`.
+3. Evidence of removal safety:
+   - No preserved core module imported `control_bot`.
+   - `dashboard_orchestrator.py` did not start it.
+   - Remaining Telegram notification helpers use direct HTTPS calls through
+     `requests`.
+4. Required checks after removal:
+   - Full pytest suite.
+   - Coverage run and report.
+   - Ruff.
+   - Compileall.
+
 ## engine_trend.py
 
 Status: **Operator-facing legacy workflow; do-not-move-yet**
@@ -85,8 +104,8 @@ Status: **Operator-facing legacy workflow; do-not-move-yet**
      `main`.
    - Writes or references trend-specific runtime artifacts such as
      `engine_trend.log`.
-   - Telegram control bot exposes TREND commands that read and write
-     trend-specific state/status/trade files.
+   - Former Telegram control bot commands read and wrote trend-specific
+     state/status/trade files before the control bot was removed.
    - Importing the module loads local environment variables.
    - Runtime execution is guarded by `main`.
 4. Risk if moved:
@@ -95,7 +114,8 @@ Status: **Operator-facing legacy workflow; do-not-move-yet**
    - Could disrupt migration or comparison work if the file is still active.
 5. How to confirm usage:
    - Run `rg "engine_trend|run_engine_trend|status_trend|summary_trend" .`.
-   - Check Telegram trend commands and operations docs.
+   - Check operations docs, local process managers, and any retained manual
+     trend-engine workflow notes.
    - Confirm with operators whether trend mode is active or historical.
 6. Proposed future action:
    - Keep in place until trend-engine usage is confirmed.
