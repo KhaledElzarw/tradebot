@@ -96,7 +96,8 @@ SQLite DBs, logs, JSONL trade logs, and runtime state files are local runtime
 artifacts. They may contain operational history, account metadata, model output,
 or other sensitive context and must stay out of source control.
 
-Examples of local-only files include:
+Examples include current runtime files and legacy local artifacts retained in
+`.gitignore` after workflow removal:
 
 - `.env`
 - `.env.*`

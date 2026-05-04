@@ -21,7 +21,7 @@ execution changes, or engine main loop changes.
 | Research replay scripts | Removed: `grid_engine_honest.py`, `grid_engine_honest_v2.py` | Removed deprecated research/backtest scripts; generated replay JSON outputs remain ignored as legacy local artifacts | Complete |
 | Telegram control bot | Removed: `control_bot.py` | Removed deprecated operator control surface; optional notification helpers remain for later ownership cleanup | Complete |
 | Baserow tooling | Removed: `baserow_sync.py`, `migrate_to_baserow.py`, `clean_baserow_tradebot_db.py`, `prune_tradebot_order_grid_rows.py` | Removed legacy sync/export/cleanup tooling; no supported Baserow env settings remain | Complete |
-| Alternate trend engine | `engine_trend.py` | Deprecated alternate engine workflow; retained until manual usage is confirmed absent | Phase 3 |
+| Alternate trend engine | Removed: `engine_trend.py` | Removed deprecated alternate engine workflow; trend runtime artifacts remain ignored as legacy local artifacts | Complete |
 | Advisor/flexy workflow | `advisor.py`, `gridMode=flexy` | Deprecated legacy advisor workflow; `flexy` remains active behavior for now | Phase 4 after characterization and explicit behavior-change approval |
 
 ## Do Not Remove Yet
@@ -42,7 +42,7 @@ execution changes, or engine main loop changes.
 2. Legacy Baserow scripts and their dedicated tests/env docs have been removed.
 3. Telegram control bot documentation, dependency, and entry point have been
    removed.
-4. Confirm alternate trend engine is unused, then remove trend-specific docs and
-   artifacts.
+4. Alternate trend engine has been removed; keep trend-specific runtime
+   artifacts ignored as legacy local artifacts.
 5. Characterize current `flexy` behavior, then remove advisor/flexy only in an
    explicitly behavior-authorized branch.
