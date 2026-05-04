@@ -32,6 +32,7 @@ CORE_PYTHON_FILES = {
     "run_dashboard_detached.py",
     "run_engine_detached.py",
     "sqlite_store.py",
+    "wrapper_runner.py",
 }
 
 

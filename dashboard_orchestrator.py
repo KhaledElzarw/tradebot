@@ -1,7 +1,8 @@
 import argparse
-import os
 import subprocess
 from pathlib import Path
+
+import wrapper_runner
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -14,7 +15,7 @@ SERVICES = {
 
 
 def get_python_executable() -> str:
-    return os.getenv("TRADEBOT_PYTHON") or PYTHON
+    return wrapper_runner.get_python_executable(PYTHON)
 
 
 def _run(service: str, command: str) -> str:
