@@ -9,6 +9,7 @@ FORBIDDEN_EXACT_PATHS = {
     ".env.grid",
     ".env.telegram",
     ".env.trend",
+    "dashboard_intelligence.json",
 }
 
 FORBIDDEN_SUFFIXES = (
