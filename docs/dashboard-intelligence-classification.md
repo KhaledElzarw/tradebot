@@ -5,14 +5,13 @@
 `dashboard_intelligence.json` is a generated runtime cache with a dashboard
 fallback role. It is not source data, seed data, or a test fixture.
 
-## Why It Is Currently Tracked
+## Tracking Status
 
-The file was already tracked before this classification work. Its root-level
-JSON snapshot shape made it look similar to other legacy runtime mirrors that
-were historically committed for local inspection or operator continuity.
-
-Keeping it tracked during the audit avoided changing dashboard startup behavior
-before explicit missing-file coverage existed.
+`dashboard_intelligence.json` is no longer tracked by Git and is ignored by
+`.gitignore`. It should remain local-only as generated dashboard runtime state.
+Its root-level JSON snapshot shape made it look similar to other legacy runtime
+mirrors that were historically committed for local inspection or operator
+continuity.
 
 ## Evidence Summary
 
@@ -60,15 +59,8 @@ trading, execution, engine, or dashboard behavior.
 
 ## Future Action
 
-After this classification and regression coverage lands, remove the tracked file
-only in a separate small cleanup commit:
-
-```bash
-git rm --cached dashboard_intelligence.json
-```
-
-Then add `dashboard_intelligence.json` to `.gitignore`. Preserve any local copy
-that exists on an operator machine.
+Keep `dashboard_intelligence.json` ignored and local-only. Preserve any local
+copy that exists on an operator machine.
 
 ## Rollback Plan
 

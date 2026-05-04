@@ -252,7 +252,7 @@ Status: **Needs confirmation; runtime artifacts must stay out of Git**
    - SQLite migration tests.
    - Manual smoke check for orchestrator, dashboard, and engine status.
 
-## Tracked Runtime-Looking Snapshot: dashboard_intelligence.json
+## Runtime Cache: dashboard_intelligence.json
 
 Status: **Classified as generated runtime cache.** See
 [Dashboard Intelligence Cache Classification](dashboard-intelligence-classification.md).
@@ -260,7 +260,7 @@ Status: **Classified as generated runtime cache.** See
 1. Current path: `dashboard_intelligence.json`
 2. Why suspicious: JSON snapshot-style filename in the repository root.
 3. Evidence of duplication or runtime/archive nature:
-   - The file is tracked.
+   - The file is not tracked and is ignored by `.gitignore`.
    - The filename suggests cached dashboard intelligence or generated state.
    - Similar runtime JSON files are ignored elsewhere.
 4. Risk if moved:
@@ -272,10 +272,9 @@ Status: **Classified as generated runtime cache.** See
    - Determine whether it is a fixture, seed data, or runtime cache.
    - Check dashboard tests and startup behavior.
 6. Proposed future action:
-   - Remove from Git tracking in a separate cleanup commit after regression
-     coverage lands, preserving any local operator copy.
-   - If generated runtime cache, move to ignored runtime storage in a later
-     explicit behavior-preserving commit.
+   - Keep ignored and local-only, preserving any local operator copy.
+   - Move to ignored runtime storage only in a later explicit
+     behavior-preserving commit.
    - If fixture/seed, rename or document its role in a future docs/test commit.
 7. Required tests before moving:
    - Full pytest suite.
