@@ -1456,7 +1456,8 @@ def build_chart_tick_payload(qs: dict[str, list[str]]) -> dict:
     return validate_chart_tick_payload(payload)
 
 
-from dashboard_routes import Handler
+# Import after dashboard globals are defined; dashboard_routes binds them lazily.
+from dashboard_routes import Handler  # noqa: E402
 
 
 if __name__ == '__main__':
