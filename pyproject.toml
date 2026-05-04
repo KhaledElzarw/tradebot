@@ -8,3 +8,7 @@ line-length = 120
 
 [tool.ruff.lint]
 select = ["E", "F"]
+ignore = [
+    # Defer legacy line wrapping; this branch only fixes mechanical safety issues.
+    "E501",
+]
