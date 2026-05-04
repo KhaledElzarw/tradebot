@@ -13,6 +13,34 @@ def test_build_grid_orders_sorted_by_distance():
     assert [round(o.price, 4) for o in orders] == [99.0, 98.01, 101.0, 102.01]
 
 
+def test_build_grid_orders_returns_empty_when_levels_are_zero():
+    assert engine._build_grid_orders(anchor=100.0, spacing_pct=0.01, levels=0, qty_per_level=0.1) == []
+
+
+def test_spacing_for_mode_uses_minimums_and_atr_multipliers():
+    assert engine._spacing_for_mode(
+        "scalpy",
+        atr=1.0,
+        price=1000.0,
+        min_scalpy=0.003,
+        min_fatty=0.01,
+    ) == (pytest.approx(0.003), 14)
+    assert engine._spacing_for_mode(
+        "scalpy",
+        atr=10.0,
+        price=1000.0,
+        min_scalpy=0.003,
+        min_fatty=0.01,
+    ) == (pytest.approx(0.008), 14)
+    assert engine._spacing_for_mode(
+        "fatty",
+        atr=10.0,
+        price=1000.0,
+        min_scalpy=0.003,
+        min_fatty=0.01,
+    ) == (pytest.approx(0.014), 8)
+
+
 def test_fill_order_paper_buy_accounts_for_fee_and_slippage():
     paper = engine.PaperAccount(usdt=100.0, btc=0.0)
     grid = engine.GridState(
