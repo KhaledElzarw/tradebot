@@ -14,7 +14,7 @@ Candidate groups:
 
 - Historical or experimental grid engines.
 - Removed Telegram control bot.
-- Trend-specific engine path.
+- Removed trend-specific engine path.
 - Advisor process.
 - Backup files matching `*.bak` or `*.bak_*`.
 - `accounting_archive_*` folders.
@@ -94,10 +94,10 @@ Status: **Removed deprecated Telegram operator control surface**
 
 ## engine_trend.py
 
-Status: **Operator-facing legacy workflow; do-not-move-yet**
+Status: **Removed deprecated alternate engine workflow**
 
-1. Current path: `engine_trend.py`
-2. Why suspicious: Alternate engine entry point in the repository root.
+1. Former path: `engine_trend.py`
+2. Why removed: Alternate engine entry point in the repository root.
 3. Evidence of duplication or runtime/archive nature:
    - Defines engine-like runtime classes and functions such as `PaperAccount`,
      `Position`, `Stats`, `_write_status`, `_append_trade`, `_ema`, `_atr`, and
@@ -106,25 +106,20 @@ Status: **Operator-facing legacy workflow; do-not-move-yet**
      `engine_trend.log`.
    - Former Telegram control bot commands read and wrote trend-specific
      state/status/trade files before the control bot was removed.
-   - Importing the module loads local environment variables.
-   - Runtime execution is guarded by `main`.
-4. Risk if moved:
-   - May break an alternate trend engine workflow.
-   - May affect operators who still run the trend engine manually.
-   - Could disrupt migration or comparison work if the file is still active.
-5. How to confirm usage:
-   - Run `rg "engine_trend|run_engine_trend|status_trend|summary_trend" .`.
-   - Check operations docs, local process managers, and any retained manual
-     trend-engine workflow notes.
-   - Confirm with operators whether trend mode is active or historical.
-6. Proposed future action:
-   - Keep in place until trend-engine usage is confirmed.
-   - If legacy, move later with a compatibility note and explicit rollback path.
-7. Required tests before moving:
+   - Importing the module loaded local environment variables.
+   - Runtime execution was guarded by `main`.
+4. Removal status:
+   - Source file has been removed as a deprecated non-core workflow.
+   - No current service manager or core module should import or invoke it.
+   - Trend-specific runtime artifacts may still exist in local workspaces and
+     remain ignored as legacy local artifacts.
+5. Follow-up cleanup:
+   - Remove stale current-runtime wording from docs.
+   - Keep `.gitignore` patterns for trend runtime artifacts in place.
+6. Required checks for documentation cleanup:
    - Full pytest suite.
    - Compileall.
-   - Characterization coverage for trend status/runtime file expectations.
-   - Manual operator confirmation that no service manager invokes it.
+   - Ruff.
 
 ## advisor.py
 
@@ -256,7 +251,7 @@ Status: **Needs confirmation for local cleanup; do not track**
 
 ## Runtime JSON/JSONL Archives and Mirrors
 
-Status: **Needs confirmation; runtime artifacts must stay out of Git**
+Status: **Runtime artifacts must stay out of Git; legacy trend mirrors remain ignored**
 
 1. Current path:
    - `state.json`

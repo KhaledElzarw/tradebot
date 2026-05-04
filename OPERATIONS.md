@@ -105,8 +105,8 @@ signal runtime state.
 
 ### Optional Telegram notifications
 
-Retained engine, advisor, and trend notification helpers can send Telegram
-messages when `TELEGRAM_CONTROL_BOT_TOKEN` and local runtime state provide a
+Retained engine and advisor notification helpers can send Telegram messages
+when `TELEGRAM_CONTROL_BOT_TOKEN` and local runtime state provide a
 destination chat. The deprecated Telegram control bot service has been removed.
 Do not commit Telegram tokens, screenshots that reveal tokens, or exported chat
 logs with operational secrets.
@@ -186,22 +186,27 @@ SQLite is the canonical local runtime store:
 
 ### JSON compatibility mirrors
 
-JSON and JSONL files remain compatibility mirrors for selected runtime flows and
-recovery/migration workflows:
+JSON and JSONL files remain compatibility mirrors for selected current runtime
+flows and recovery/migration workflows:
 
 - `state.json`
-- `state_trend.json`
 - `runtime_state.json`
 - `engine_status.json`
-- `engine_status_trend.json`
 - `cumulative.json`
-- `cumulative_trend.json`
 - `trades.jsonl`
-- `trades_trend.jsonl`
 - `ai_signal.json`
 - `ai_decisions.jsonl`
 - `ai_memory.json`
 - `dashboard_history.json`
+
+Legacy local artifacts from removed workflows remain ignored so old runtime
+files do not become source changes:
+
+- `state_trend.json`
+- `engine_status_trend.json`
+- `cumulative_trend.json`
+- `trades_trend.jsonl`
+- `engine_trend.log`
 
 ### Logs
 
@@ -209,7 +214,6 @@ Logs are local runtime artifacts:
 
 - `advisor.log`
 - `engine.log`
-- `engine_trend.log`
 - `*.nohup.out`
 
 ### PID files
@@ -301,7 +305,7 @@ or paste file contents when the path may contain secrets or runtime state.
 - Confirm the local environment contains `TELEGRAM_CONTROL_BOT_TOKEN` only if
   notification delivery is expected.
 - Confirm network access to Telegram.
-- Review engine, advisor, or trend logs locally without printing token values.
+- Review engine or advisor logs locally without printing token values.
 - Rotate the bot token if it may have been exposed.
 
 ## Troubleshooting AI sidecar

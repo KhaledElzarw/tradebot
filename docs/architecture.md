@@ -16,7 +16,7 @@ The main operating shape is:
 - JSON and JSONL files remain compatibility mirrors for legacy/runtime flows.
 - `dashboard_server.py`, `dashboard_routes.py`, and dashboard static assets
   expose monitoring and selected control surfaces.
-- Retained engine, advisor, and trend helpers can send optional Telegram
+- Retained engine and advisor helpers can send optional Telegram
   notifications through direct HTTPS calls.
 - `ai_sidecar.py` produces optional AI decisions and review context.
 - Wrapper scripts and `dashboard_orchestrator.py` start, stop, and inspect
@@ -68,21 +68,22 @@ history, AI strategy records, and related runtime persistence.
 JSON and JSONL files remain compatibility mirrors for legacy/runtime flows and
 simple operator inspection. They are runtime artifacts, not source files.
 
-Examples include:
+Current examples include:
 
 - `state.json`
-- `state_trend.json`
 - `runtime_state.json`
 - `engine_status.json`
-- `engine_status_trend.json`
 - `cumulative.json`
-- `cumulative_trend.json`
 - `trades.jsonl`
-- `trades_trend.jsonl`
 - `ai_signal.json`
 - `ai_decisions.jsonl`
 - `ai_memory.json`
 - `dashboard_history.json`
+
+Legacy trend mirrors such as `state_trend.json`, `engine_status_trend.json`,
+`cumulative_trend.json`, and `trades_trend.jsonl` may exist in old local
+workspaces and remain ignored as local artifacts, but the removed trend engine
+is not part of the current runtime architecture.
 
 Future refactors should reduce mixed source/runtime concerns carefully, but not
 by changing persistence behavior in the same commit as structural movement.
@@ -131,8 +132,7 @@ handling, model selection, prompt semantics, or engine consumption behavior.
 ## Optional Telegram Notification Responsibilities
 
 Current Telegram behavior is limited to retained notification helpers in
-`engine.py`, `advisor.py`, and `engine_trend.py`. These helpers are responsible
-for:
+`engine.py` and `advisor.py`. These helpers are responsible for:
 
 - Sending selected runtime notifications when `TELEGRAM_CONTROL_BOT_TOKEN` and
   local runtime state provide a destination chat.

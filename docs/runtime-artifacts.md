@@ -63,7 +63,7 @@ PID files are machine-specific and should never be committed.
 
 ## JSON/JSONL Runtime Mirrors
 
-JSON and JSONL runtime mirrors are local artifacts. Examples include:
+JSON and JSONL runtime mirrors are local artifacts. Current examples include:
 
 - `state.json`
 - `runtime_state.json`
@@ -71,22 +71,23 @@ JSON and JSONL runtime mirrors are local artifacts. Examples include:
 - `ai_decisions.jsonl`
 - `dashboard_history.json`
 - `dashboard_intelligence.json` - generated local dashboard intelligence cache
-- `grid_honest_replay*.json` - legacy generated honest replay outputs; ignored
-  to avoid surfacing old local files after replay script removal
-
-Other current mirrors include:
-
-- `state_trend.json`
 - `engine_status.json`
-- `engine_status_trend.json`
 - `cumulative.json`
-- `cumulative_trend.json`
-- `trades_trend.jsonl`
 - `ai_signal.json`
 - `ai_memory.json`
 
-These files may be useful for compatibility, inspection, recovery, or migration
-work, but they are not source files.
+Legacy local artifacts from removed workflows also remain ignored:
+
+- `grid_honest_replay*.json` - legacy generated honest replay outputs; ignored
+  to avoid surfacing old local files after replay script removal
+- `state_trend.json` - legacy trend engine mirror
+- `engine_status_trend.json` - legacy trend engine mirror
+- `cumulative_trend.json` - legacy trend engine mirror
+- `trades_trend.jsonl` - legacy trend engine mirror
+- `engine_trend.log` - legacy trend engine log
+
+Runtime mirrors and retained legacy artifacts may be useful for compatibility,
+inspection, recovery, or migration work, but they are not source files.
 
 ## Local Config
 

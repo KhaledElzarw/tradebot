@@ -186,9 +186,10 @@ Before moving legacy or research scripts:
 - Keep runtime archives and generated outputs out of Git.
 - Move files only in a dedicated branch with no logic changes.
 
-Deprecated honest replay scripts and legacy Baserow tooling have been removed.
-`engine_trend.py`, `advisor.py`, and migration tools should remain in place
-until their ownership and expected behavior are confirmed.
+Deprecated honest replay scripts, legacy Baserow tooling, the deprecated
+Telegram control bot, and the alternate trend engine have been removed.
+`advisor.py` and migration tools should remain in place until their ownership
+and expected behavior are confirmed.
 
 ## Prerequisites Before `src/` Layout Migration
 

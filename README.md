@@ -54,8 +54,8 @@ engine configuration explicitly consumes it.
 
 ### Optional Telegram notifications
 
-Retained engine, advisor, and trend notification helpers can send Telegram
-messages when `TELEGRAM_CONTROL_BOT_TOKEN` and local runtime state provide a
+Retained engine and advisor notification helpers can send Telegram messages
+when `TELEGRAM_CONTROL_BOT_TOKEN` and local runtime state provide a
 destination chat. The deprecated Telegram control bot has been removed; broader
 notification cleanup is deferred to a later branch.
 
