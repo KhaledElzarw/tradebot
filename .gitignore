@@ -25,6 +25,7 @@ cumulative.json
 cumulative_trend.json
 dashboard_intelligence.json
 dashboard_history.json
+grid_honest_replay*.json
 engine_status.json
 engine_status_trend.json
 runtime_state.json
