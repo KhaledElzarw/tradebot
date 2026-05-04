@@ -31,6 +31,8 @@ Status: **Needs confirmation**
    - Defines helpers such as `_ema`, `_atr`, `_spacing_for_mode`,
      `_build_grid_orders`, and `_fill_order_paper`.
    - Similar concepts also exist in the main engine path.
+   - Generates `grid_honest_replay.json` and
+     `grid_honest_replay_equity.json`; these should remain ignored if produced.
 4. Risk if moved:
    - May break manual backtesting, ad hoc operator workflows, or undocumented
      scripts.
@@ -61,6 +63,8 @@ Status: **Needs confirmation**
    - Defines `PaperAccount`, `GridOrder`, and `GridState`.
    - Defines `_ema`, `_atr`, `_build_grid_orders`, and `_fill`.
    - Overlaps conceptually with `grid_engine_honest.py` and `engine.py`.
+   - Generates `grid_honest_replay_v2.json`; this should remain ignored if
+     produced.
 4. Risk if moved:
    - May break local experiments or comparison scripts.
    - Versioned name may hide knowledge about why v2 exists.

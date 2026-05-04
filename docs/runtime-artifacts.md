@@ -71,6 +71,7 @@ JSON and JSONL runtime mirrors are local artifacts. Examples include:
 - `ai_decisions.jsonl`
 - `dashboard_history.json`
 - `dashboard_intelligence.json` - generated local dashboard intelligence cache
+- `grid_honest_replay*.json` - generated honest grid replay outputs
 
 Other current mirrors include:
 
