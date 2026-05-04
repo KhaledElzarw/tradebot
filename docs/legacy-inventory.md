@@ -254,7 +254,8 @@ Status: **Needs confirmation; runtime artifacts must stay out of Git**
 
 ## Tracked Runtime-Looking Snapshot: dashboard_intelligence.json
 
-Status: **Needs confirmation**
+Status: **Classified as generated runtime cache.** See
+[Dashboard Intelligence Cache Classification](dashboard-intelligence-classification.md).
 
 1. Current path: `dashboard_intelligence.json`
 2. Why suspicious: JSON snapshot-style filename in the repository root.
@@ -271,7 +272,8 @@ Status: **Needs confirmation**
    - Determine whether it is a fixture, seed data, or runtime cache.
    - Check dashboard tests and startup behavior.
 6. Proposed future action:
-   - Keep tracked until purpose is confirmed.
+   - Remove from Git tracking in a separate cleanup commit after regression
+     coverage lands, preserving any local operator copy.
    - If generated runtime cache, move to ignored runtime storage in a later
      explicit behavior-preserving commit.
    - If fixture/seed, rename or document its role in a future docs/test commit.
