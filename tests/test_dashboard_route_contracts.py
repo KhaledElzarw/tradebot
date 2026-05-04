@@ -19,8 +19,15 @@ def _url(server, path):
     return f"http://{host}:{port}{path}"
 
 
-def _request(server, path):
-    with urllib.request.urlopen(_url(server, path), timeout=2) as response:
+def _request(server, path, *, method="GET", body=None, headers=None):
+    data = None if body is None else json.dumps(body).encode("utf-8")
+    request = urllib.request.Request(
+        _url(server, path),
+        data=data,
+        method=method,
+        headers={"Content-Type": "application/json", **(headers or {})},
+    )
+    with urllib.request.urlopen(request, timeout=2) as response:
         return response.status, response.headers, response.read()
 
 
@@ -146,3 +153,87 @@ def test_api_dashboard_route_returns_dashboard_json_contract(monkeypatch):
     assert payload["chartOffset"] == 2
     assert payload["ohlcv"] == []
     assert payload["state"]["aiEndpointKey"] == "local"
+
+
+def test_api_control_updates_paused_state_when_token_unset(monkeypatch):
+    monkeypatch.setattr(dashboard_server, "DASHBOARD_TOKEN", "")
+
+    def update_state_locked(updater):
+        return updater({"paused": False})
+
+    monkeypatch.setattr(dashboard_server, "update_state_locked", update_state_locked)
+    server = _start_server()
+    try:
+        status, headers, body = _request(server, "/api/control", method="POST", body={"paused": True})
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert status == 200
+    assert headers["Content-Type"].startswith("application/json")
+    assert json.loads(body.decode("utf-8")) == {"ok": True, "paused": True}
+
+
+def test_post_mutation_routes_return_403_when_token_missing(monkeypatch):
+    monkeypatch.setattr(dashboard_server, "DASHBOARD_TOKEN", "secret")
+    server = _start_server()
+    try:
+        for path in ("/api/control", "/api/config"):
+            try:
+                _request(server, path, method="POST", body={})
+            except urllib.error.HTTPError as exc:
+                assert exc.code == 403
+                assert exc.read() == b"Forbidden"
+            else:
+                raise AssertionError(f"expected 403 for {path}")
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_api_config_applies_patch_and_calls_sidecar_sync(monkeypatch):
+    monkeypatch.setattr(dashboard_server, "DASHBOARD_TOKEN", "secret")
+    sidecar_calls = []
+    monkeypatch.setattr(dashboard_server, "_sync_ai_sidecar_for_state", lambda state, patch: sidecar_calls.append((state, patch)))
+
+    def update_state_locked(updater):
+        return updater({"gridMode": "scalpy", "aiEnabled": False})
+
+    monkeypatch.setattr(dashboard_server, "update_state_locked", update_state_locked)
+    server = _start_server()
+    try:
+        status, headers, body = _request(
+            server,
+            "/api/config",
+            method="POST",
+            body={"gridMode": "fatty", "gridLevels": "12"},
+            headers={"X-Tradebot-Token": "secret"},
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    payload = json.loads(body.decode("utf-8"))
+    assert status == 200
+    assert headers["Content-Type"].startswith("application/json")
+    assert payload["ok"] is True
+    assert payload["state"]["gridMode"] == "fatty"
+    assert payload["state"]["gridLevels"] == 12
+    assert sidecar_calls == [(payload["state"], {"gridMode": "fatty", "gridLevels": 12})]
+
+
+def test_api_config_bad_payload_returns_current_500_error_contract(monkeypatch):
+    monkeypatch.setattr(dashboard_server, "DASHBOARD_TOKEN", "")
+    server = _start_server()
+    try:
+        try:
+            _request(server, "/api/config", method="POST", body={"gridMode": "chaos"})
+        except urllib.error.HTTPError as exc:
+            body = json.loads(exc.read().decode("utf-8"))
+            assert exc.code == 500
+            assert "gridMode must be one of" in body["error"]
+        else:
+            raise AssertionError("expected 500")
+    finally:
+        server.shutdown()
+        server.server_close()
