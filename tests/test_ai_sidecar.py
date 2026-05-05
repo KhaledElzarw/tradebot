@@ -1,3 +1,5 @@
+import json
+
 import ai_sidecar
 import pytest
 
@@ -11,6 +13,12 @@ class _FakeResponse:
 
     def json(self):
         return self._payload
+
+
+class _StopSidecarLoop(Exception):
+    def __init__(self, seconds):
+        super().__init__(seconds)
+        self.seconds = seconds
 
 
 def _minimal_payload():
@@ -50,6 +58,28 @@ def _patch_multi_agent_boundaries(monkeypatch):
         return _fake_agent_report(role)
 
     monkeypatch.setattr(ai_sidecar, "_run_agent", fake_run_agent)
+
+
+def _patch_main_loop_io(monkeypatch, *, state, runtime=None):
+    logs = []
+    written = []
+
+    def fake_read_json(path):
+        if path == ai_sidecar.STATE_PATH:
+            return state
+        if path == ai_sidecar.RUNTIME_PATH:
+            return runtime or {}
+        raise AssertionError(f"unexpected read: {path}")
+
+    def stop_sleep(seconds):
+        raise _StopSidecarLoop(seconds)
+
+    monkeypatch.setattr("sys.argv", ["ai_sidecar.py"])
+    monkeypatch.setattr(ai_sidecar, "_read_json", fake_read_json)
+    monkeypatch.setattr(ai_sidecar, "_log", logs.append)
+    monkeypatch.setattr(ai_sidecar, "_write_ai_signal", written.append)
+    monkeypatch.setattr(ai_sidecar.time, "sleep", stop_sleep)
+    return logs, written
 
 
 def test_safe_number_helpers_use_defaults():
@@ -589,6 +619,115 @@ def test_query_model_delegates_with_persist_true(monkeypatch):
 
     assert ai_sidecar._query_model(state, payload) == {"decisionId": "d1"}
     assert calls == [{"state": state, "payload": payload, "persist": True}]
+
+
+def test_main_once_runs_one_review_and_prints_json(monkeypatch, capsys):
+    calls = []
+    monkeypatch.setattr("sys.argv", ["ai_sidecar.py", "--once", "--write-signal"])
+    monkeypatch.setattr(
+        ai_sidecar,
+        "_run_once",
+        lambda **kwargs: calls.append(kwargs) or {"decisionId": "d1"},
+    )
+
+    ai_sidecar.main()
+
+    assert calls == [{"persist": True, "write_signal": True}]
+    assert json.loads(capsys.readouterr().out) == {"decisionId": "d1"}
+
+
+def test_main_disabled_loop_writes_disabled_signal_and_sleeps(monkeypatch):
+    logs, written = _patch_main_loop_io(monkeypatch, state={"aiEnabled": False})
+
+    with pytest.raises(_StopSidecarLoop) as exc:
+        ai_sidecar.main()
+
+    assert exc.value.seconds == 2
+    assert logs == ["BOOT", "DISABLED"]
+    assert written[0]["enabled"] is False
+    assert written[0]["source"] == "disabled"
+
+
+def test_main_no_payload_logs_and_sleeps_without_signal_write(monkeypatch):
+    logs, written = _patch_main_loop_io(monkeypatch, state={"aiEnabled": True})
+    monkeypatch.setattr(ai_sidecar, "_build_payload", lambda state, runtime: None)
+
+    with pytest.raises(_StopSidecarLoop) as exc:
+        ai_sidecar.main()
+
+    assert exc.value.seconds == 2
+    assert logs == ["BOOT", "NO_PAYLOAD"]
+    assert written == []
+
+
+def test_main_success_writes_signal_and_uses_configured_poll(monkeypatch):
+    state = {"aiEnabled": True, "aiPollSeconds": 3}
+    payload = _minimal_payload()
+    result = {"model": "m", "riskAction": "allow_grid", "gridAllowed": True}
+    logs, written = _patch_main_loop_io(monkeypatch, state=state)
+    monkeypatch.setattr(ai_sidecar, "_build_payload", lambda state, runtime: payload)
+    monkeypatch.setattr(ai_sidecar, "_query_model", lambda state, payload: result)
+
+    with pytest.raises(_StopSidecarLoop) as exc:
+        ai_sidecar.main()
+
+    assert exc.value.seconds == 3.0
+    assert written == [result]
+    assert logs == [
+        "BOOT",
+        "SIGNAL_WRITTEN model=m action=allow_grid stale=False gridAllowed=True",
+    ]
+
+
+def test_main_ai_disabled_exception_writes_disabled_signal(monkeypatch):
+    logs, written = _patch_main_loop_io(
+        monkeypatch,
+        state={"aiEnabled": True, "aiPollSeconds": 4},
+    )
+    monkeypatch.setattr(ai_sidecar, "_build_payload", lambda state, runtime: _minimal_payload())
+
+    def disabled(state, payload):
+        raise ai_sidecar.AiDisabled("off")
+
+    monkeypatch.setattr(ai_sidecar, "_query_model", disabled)
+
+    with pytest.raises(_StopSidecarLoop) as exc:
+        ai_sidecar.main()
+
+    assert exc.value.seconds == 4.0
+    assert logs == ["BOOT", "DISABLED"]
+    assert written[0]["enabled"] is False
+    assert written[0]["source"] == "disabled"
+
+
+def test_main_generic_exception_marks_existing_signal_stale(monkeypatch):
+    state = {
+        "aiEnabled": True,
+        "aiPollSeconds": "2.5",
+        "aiProvider": "test-provider",
+        "aiModel": "test-model",
+    }
+    logs, written = _patch_main_loop_io(monkeypatch, state=state)
+    monkeypatch.setattr(ai_sidecar, "_build_payload", lambda state, runtime: _minimal_payload())
+    monkeypatch.setattr(ai_sidecar, "_read_ai_signal", lambda: {"decisionId": "old"})
+
+    def fail_query(state, payload):
+        raise RuntimeError("model down")
+
+    monkeypatch.setattr(ai_sidecar, "_query_model", fail_query)
+
+    with pytest.raises(_StopSidecarLoop) as exc:
+        ai_sidecar.main()
+
+    assert exc.value.seconds == 2.5
+    assert written[0]["decisionId"] == "old"
+    assert written[0]["enabled"] is True
+    assert written[0]["provider"] == "test-provider"
+    assert written[0]["model"] == "test-model"
+    assert written[0]["error"] == "model down"
+    assert written[0]["stale"] is True
+    assert written[0]["tsUtc"]
+    assert logs == ["BOOT", "REQUEST_ERROR model=test-model error=model down"]
 
 
 def test_run_multi_agent_decision_refreshes_and_injects_lessons(monkeypatch):
