@@ -258,3 +258,109 @@ def test_run_once_uses_persist_flag_and_write_signal_boundary(monkeypatch):
     assert calls["persist"] is False
     assert calls["payload"]["price"] == 100.0
     assert written == [decision]
+
+
+def test_run_multi_agent_decision_refreshes_and_injects_lessons(monkeypatch):
+    lesson_calls = []
+    agent_calls = []
+    portfolio_prompts = []
+    appended = []
+
+    monkeypatch.setattr(ai_sidecar, "_log", lambda msg: None)
+    monkeypatch.setattr(ai_sidecar, "_ensure_ai_enabled", lambda: None)
+    monkeypatch.setattr(
+        ai_sidecar,
+        "update_lessons_from_trades",
+        lambda: lesson_calls.append("updated") or 2,
+    )
+
+    def fake_recent_lessons(symbol):
+        lesson_calls.append(symbol)
+        return "LESSON TEXT"
+
+    def fake_model_config(state):
+        return {
+            "provider": "local",
+            "host": "http://unused",
+            "model": "deep",
+            "quick_model": "quick",
+            "deep_model": "deep",
+            "fallback_model": "",
+            "timeout_s": 2.0,
+        }
+
+    def fake_load_template(name):
+        if name == "portfolio_manager":
+            return "portfolio {role} {payload_json} {lessons} {reports_json}"
+        return "agent {role} {payload_json} {lessons} {reports_json}"
+
+    def fake_run_agent(*, role, template, state, payload, model, lessons, reports=None):
+        agent_calls.append(
+            {
+                "role": role,
+                "template": template,
+                "model": model,
+                "lessons": lessons,
+                "reports_seen": sorted((reports or {}).keys()),
+            },
+        )
+        return {
+            "role": role,
+            "summary": "",
+            "confidence": 0.5,
+            "risk_score": 0.1,
+            "recommendation": "hold",
+            "evidence": [],
+            "raw": {},
+        }
+
+    def fake_chat_json(*, state, model, messages, max_tokens=500):
+        portfolio_prompts.append(messages[-1]["content"])
+        return {
+            "riskAction": "allow_grid",
+            "confidence": 0.9,
+            "recommendedSpacingPct": 0.01,
+            "recommendedLevels": 12,
+            "recommendedMaxExposurePct": 0.25,
+            "riskBudgetPct": 0.25,
+        }
+
+    monkeypatch.setattr(ai_sidecar, "recent_lessons", fake_recent_lessons)
+    monkeypatch.setattr(ai_sidecar, "_model_config", fake_model_config)
+    monkeypatch.setattr(ai_sidecar, "_load_template", fake_load_template)
+    monkeypatch.setattr(ai_sidecar, "_run_agent", fake_run_agent)
+    monkeypatch.setattr(ai_sidecar, "_chat_json", fake_chat_json)
+    monkeypatch.setattr(
+        ai_sidecar,
+        "append_decision",
+        lambda *args, **kwargs: appended.append((args, kwargs)),
+    )
+
+    decision = ai_sidecar._run_multi_agent_decision(
+        {"symbol": "BTCUSDT", "gridMaxExposurePct": 0.35},
+        {"symbol": "BTCUSDT", "interval": "1m", "price": 100.0},
+        persist=False,
+    )
+
+    assert lesson_calls == ["updated", "BTCUSDT"]
+    assert [call["role"] for call in agent_calls] == [
+        "market_regime",
+        "grid_risk",
+        "position_risk",
+        "execution_guard",
+        "bull_case",
+        "bear_case",
+    ]
+    assert all(call["lessons"] == "LESSON TEXT" for call in agent_calls)
+    assert agent_calls[0]["reports_seen"] == []
+    assert agent_calls[-1]["reports_seen"] == [
+        "bull_case",
+        "execution_guard",
+        "grid_risk",
+        "market_regime",
+        "position_risk",
+    ]
+    assert len(portfolio_prompts) == 1
+    assert "LESSON TEXT" in portfolio_prompts[0]
+    assert decision["source"] == "local_multi_agent"
+    assert appended == []
