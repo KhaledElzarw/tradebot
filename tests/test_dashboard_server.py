@@ -234,3 +234,264 @@ def test_market_payload_applies_fresh_status_price_to_active_candle(monkeypatch)
     assert payload["status"]["price"] == 105.0
     assert payload["ohlcv"][-1]["close"] == 105.0
     assert payload["ohlcv"][-1]["high"] == 105.0
+
+
+def test_ai_endpoint_helpers_normalize_and_resolve_custom_endpoint(monkeypatch):
+    assert (
+        dashboard_server._normalize_ai_base_url(" http://127.0.0.1:11434/v1/ ")
+        == "http://127.0.0.1:11434/v1"
+    )
+    assert (
+        dashboard_server.infer_ai_endpoint_key({
+            "aiBaseUrl": " http://127.0.0.1:11434/v1/ ",
+        })
+        == "local"
+    )
+
+    monkeypatch.setenv(
+        "TRADEBOT_AI_BASE_URL",
+        " http://10.0.0.7:11434/v1/ ",
+    )
+    endpoint = dashboard_server.active_ai_endpoint({
+        "aiEndpointKey": "custom",
+        "aiProvider": "openai",
+    })
+
+    assert endpoint["key"] == "custom"
+    assert endpoint["baseUrl"] == "http://10.0.0.7:11434/v1"
+    assert endpoint["provider"] == "openai"
+
+
+def test_ai_model_candidates_and_name_extraction_cover_payload_shapes():
+    assert dashboard_server._ai_model_candidates("") == []
+    assert dashboard_server._ai_model_candidates(" http://ai.local/ ") == [
+        "http://ai.local/models",
+        "http://ai.local/v1/models",
+        "http://ai.local/api/tags",
+    ]
+    assert dashboard_server._ai_model_candidates("http://ai.local/v1") == [
+        "http://ai.local/v1/models",
+        "http://ai.local/api/tags",
+    ]
+    assert dashboard_server._extract_ai_model_names({
+        "models": [
+            "llama3",
+            {"name": "qwen"},
+            {"model": "mixtral"},
+            "llama3",
+            None,
+        ],
+    }) == ["llama3", "qwen", "mixtral"]
+
+
+def test_fetch_ai_models_uses_candidates_and_cache(monkeypatch):
+    class Response:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self.payload
+
+    calls = []
+
+    def fake_get(url, timeout):
+        calls.append((url, timeout))
+        if url == "http://ai.local/models":
+            raise RuntimeError("first candidate down")
+        return Response({"models": ["qwen3:4b", {"name": "llama3"}]})
+
+    monkeypatch.setattr(dashboard_server.requests, "get", fake_get)
+    dashboard_server._ai_model_cache.clear()
+    try:
+        assert dashboard_server.fetch_ai_models("") == []
+        assert dashboard_server.fetch_ai_models(
+            "http://ai.local",
+            force=True,
+        ) == ["qwen3:4b", "llama3"]
+        assert [url for url, _timeout in calls] == [
+            "http://ai.local/models",
+            "http://ai.local/v1/models",
+        ]
+
+        calls.clear()
+        assert dashboard_server.fetch_ai_models("http://ai.local") == [
+            "qwen3:4b",
+            "llama3",
+        ]
+        assert calls == []
+    finally:
+        dashboard_server._ai_model_cache.clear()
+
+
+def test_ai_model_payload_helpers_use_active_endpoint(monkeypatch):
+    calls = []
+
+    def fake_fetch(base_url, force=False):
+        calls.append((base_url, force))
+        return [f"model-for-{base_url or 'empty'}"]
+
+    monkeypatch.setattr(dashboard_server, "fetch_ai_models", fake_fetch)
+    state = {
+        "aiEndpointKey": "custom",
+        "aiBaseUrl": "http://custom.local/v1",
+        "aiProvider": "openai",
+    }
+
+    endpoint, models_by_endpoint = dashboard_server.ai_endpoint_payload(state)
+
+    assert endpoint["key"] == "custom"
+    assert endpoint["baseUrl"] == "http://custom.local/v1"
+    assert models_by_endpoint["custom"] == [
+        "model-for-http://custom.local/v1",
+    ]
+    assert dashboard_server.get_ai_models(state) == [
+        "model-for-http://custom.local/v1",
+    ]
+    assert any(
+        base_url == "http://custom.local/v1"
+        for base_url, _force in calls
+    )
+
+
+def test_event_patch_helpers_ignore_bad_event_ids():
+    events = [
+        {"_eventId": "bad", "event": "skip"},
+        {"eventId": 2, "event": "keep"},
+    ]
+
+    assert dashboard_server.event_cursor(events) == 2
+    patch = dashboard_server.build_event_patch(events, 1)
+
+    assert patch["cursor"] == 2
+    assert patch["items"] == [{"eventId": 2, "event": "keep"}]
+    assert dashboard_server.build_event_patch(
+        events,
+        0,
+        snapshot=True,
+    )["items"] == events
+
+
+def test_order_patch_helpers_are_stable_and_strip_runtime_orders():
+    buy = {
+        "side": "BUY",
+        "price": 100.0,
+        "qty_btc": 0.01,
+        "total": 1.0,
+        "type": "LIMIT",
+    }
+    with_id = {**buy, "id": "order-1"}
+    explicit_key = dashboard_server.order_patch_key(with_id)
+
+    assert explicit_key != dashboard_server.order_patch_key(buy)
+    items = dashboard_server.normalize_order_patch_items([
+        {**with_id, "_orderKey": "fixed"},
+        buy,
+    ])
+    assert items[0]["_orderKey"] == "fixed"
+    assert "_orderKey" in items[1]
+    assert dashboard_server.order_signature([with_id, buy]) == (
+        dashboard_server.order_signature([buy, with_id])
+    )
+
+    snapshot, previous = dashboard_server.build_order_patch(
+        [with_id],
+        None,
+        snapshot=True,
+    )
+    assert snapshot["mode"] == "snapshot"
+    delta, current = dashboard_server.build_order_patch([with_id], previous)
+    assert delta["ops"] == []
+    removed, _current = dashboard_server.build_order_patch([], current)
+    assert removed["ops"] == [{"op": "remove", "key": explicit_key}]
+
+    runtime = {"grid": {"orders": [with_id], "mode": "scalpy"}, "other": 1}
+    stripped = dashboard_server.strip_orders_from_runtime(runtime)
+
+    assert stripped == {"grid": {"mode": "scalpy"}, "other": 1}
+    assert "orders" in runtime["grid"]
+
+
+def test_market_price_helpers_handle_live_price_and_bad_inputs():
+    rows = [{"open": 100.0, "high": 102.0, "low": 99.0, "close": 101.0}]
+
+    merged = dashboard_server.merge_live_price_into_ohlcv(rows, 98.0)
+
+    assert merged[-1]["close"] == 98.0
+    assert merged[-1]["high"] == 102.0
+    assert merged[-1]["low"] == 98.0
+    assert rows[-1]["close"] == 101.0
+    assert dashboard_server.merge_live_price_into_ohlcv([], 98.0) == []
+    malformed = dashboard_server.merge_live_price_into_ohlcv(
+        [{"high": object(), "low": 1.0, "close": 1.0}],
+        2.0,
+    )
+    assert malformed[-1]["close"] == 2.0
+    assert dashboard_server.latest_ohlcv_price([{"close": "bad"}]) is None
+    assert dashboard_server.apply_market_price_to_status(
+        {"price": 80.0},
+        "bad",
+    ) == {"price": 80.0}
+
+    priced = dashboard_server.apply_market_price_to_status({
+        "usdt": "bad",
+        "btc": "1",
+        "position": {"qtyBtc": "bad", "entryPrice": "90"},
+    }, 100.0)
+
+    assert priced["price"] == 100.0
+    assert "equityUsdt" not in priced
+    assert "unrealizedPnlUsdt" not in priced["position"]
+
+
+def test_interval_timestamp_and_status_ohlcv_edge_cases(monkeypatch):
+    assert dashboard_server.normalize_interval(None) == "1m"
+    assert dashboard_server.normalize_interval("bogus") == "1m"
+    assert dashboard_server.interval_duration_ms("bogus") == 60_000
+    assert dashboard_server._iso_to_ms(None) is None
+    assert dashboard_server._iso_to_ms("1970-01-01T00:00:01Z") == 1000
+    assert dashboard_server._iso_to_ms("1970-01-01T00:00:01") == 1000
+    assert dashboard_server._iso_to_ms("not a timestamp") is None
+
+    row = {
+        "openTimeMs": 120_000,
+        "open": 100.0,
+        "high": 102.0,
+        "low": 99.0,
+        "close": 101.0,
+        "closeTimeMs": 179_999,
+        "symbol": "BTCUSDT",
+        "interval": "1m",
+    }
+    status = {"tsUtc": "1970-01-01T00:01:00+00:00", "price": 105.0}
+
+    assert dashboard_server.apply_status_price_to_ohlcv(
+        [],
+        status,
+        "1m",
+    ) == []
+    monkeypatch.setattr(dashboard_server, "freshness_seconds", lambda ts: 999.0)
+    assert dashboard_server.apply_status_price_to_ohlcv(
+        [row],
+        status,
+        "1m",
+    ) == [row]
+
+    monkeypatch.setattr(dashboard_server, "freshness_seconds", lambda ts: 0.1)
+    assert dashboard_server.apply_status_price_to_ohlcv(
+        [row],
+        {**status, "price": "bad"},
+        "1m",
+    ) == [row]
+    assert dashboard_server.apply_status_price_to_ohlcv(
+        [row],
+        {**status, "price": 0},
+        "1m",
+    ) == [row]
+    assert dashboard_server.apply_status_price_to_ohlcv(
+        [row],
+        status,
+        "1m",
+    ) == [row]
