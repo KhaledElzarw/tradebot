@@ -139,15 +139,12 @@ python3 -m coverage report -m
 
 ## Running smoke checks
 
-Run the Binance REST smoke check after configuring local environment values:
+Run tests for the local Python contracts:
 
 ```bash
 source .venv/bin/activate
-python bot.py
+python -m pytest -q
 ```
-
-Expected output includes ping/server-time checks, market-data checks, and
-authenticated account checks when credentials are configured.
 
 Run Python compilation as a quick syntax check:
 
@@ -224,7 +221,6 @@ For the full source-vs-runtime policy and future runtime layout guidance, see
 
 ```text
 .
-|-- bot.py                         # Binance REST smoke check
 |-- engine.py                      # Trading engine
 |-- sqlite_store.py                # SQLite persistence helpers
 |-- dashboard_server.py            # Dashboard server

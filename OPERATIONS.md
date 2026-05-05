@@ -26,17 +26,24 @@ Core operating rules:
 
 ### Smoke test
 
-Use the smoke test to verify Python dependencies, Binance connectivity, server
-time, authentication, balances, and market data without starting long-running
-services:
+Use local smoke checks to verify Python dependencies and syntax without hitting
+external services:
 
 ```bash
 source .venv/bin/activate
-python bot.py
+python -m pytest -q
+python -m compileall -q .
 ```
 
-Authenticated checks require local Binance credentials in `.env`. Do not commit
-`.env`.
+When services are already running, check orchestrator status without printing
+secret values:
+
+```bash
+python dashboard_orchestrator.py status
+```
+
+Local Binance credentials may still be required for runtime operation. Keep them
+in `.env` and do not commit `.env`.
 
 ### Paper/testnet
 
@@ -350,8 +357,8 @@ Use a conservative upgrade process:
 4. Install dependencies in a virtual environment.
 5. Run `python -m pytest -q`.
 6. Run `python -m compileall -q .`.
-7. Run `python bot.py` against the intended smoke-test environment.
-8. Start services with `python dashboard_orchestrator.py start`.
+7. Start services with `python dashboard_orchestrator.py start`.
+8. Run `python dashboard_orchestrator.py status`.
 9. Check dashboard, engine, and AI sidecar status.
 10. Monitor logs and runtime state before considering any live-risk operation.
 
