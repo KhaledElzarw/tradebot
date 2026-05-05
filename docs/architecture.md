@@ -24,7 +24,6 @@ The main operating shape is:
 
 ## Main Entry Points
 
-- `bot.py`: Binance REST smoke check.
 - `engine.py`: trading engine entry point.
 - `dashboard_server.py`: dashboard server entry point.
 - `ai_sidecar.py`: AI sidecar entry point.
