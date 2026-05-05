@@ -166,6 +166,16 @@ def test_build_payload_returns_none_when_no_price(monkeypatch):
     assert ai_sidecar._build_payload({}, {"market": {}}) is None
 
 
+def test_build_payload_returns_none_when_status_read_fails(monkeypatch):
+    def fail_read_json(path):
+        assert path == str(ai_sidecar.STATUS_PATH)
+        raise OSError("status unavailable")
+
+    monkeypatch.setattr(ai_sidecar, "_read_json", fail_read_json)
+
+    assert ai_sidecar._build_payload({}, {"market": {}}) is None
+
+
 def test_fallback_decision_is_not_stale_and_has_source():
     payload = {
         "symbol": "BTCUSDT",
@@ -219,6 +229,32 @@ def test_fallback_decision_persist_false_does_not_append(monkeypatch):
     assert decision["keyRisks"] == ["model offline"]
 
 
+def test_fallback_decision_persist_true_appends(monkeypatch):
+    appended = []
+
+    def fake_append(decision, *, prompts, reports):
+        appended.append({"decision": decision, "prompts": prompts, "reports": reports})
+
+    monkeypatch.setattr(ai_sidecar, "append_decision", fake_append)
+
+    decision = ai_sidecar._fallback_decision(
+        state={"gridMaxExposurePct": 0.35},
+        payload=_minimal_payload(),
+        cfg={"provider": "local", "model": "m", "quick_model": "q", "deep_model": "d"},
+        started=0.0,
+        error=RuntimeError("model offline"),
+        persist=True,
+    )
+
+    assert appended == [
+        {
+            "decision": decision,
+            "prompts": {"fallback": decision["promptHash"]},
+            "reports": {},
+        },
+    ]
+
+
 def test_synthetic_case_report_is_deterministic_for_bull_and_bear_cases():
     payload = {
         "trendStrength": 0.02,
@@ -258,6 +294,17 @@ def test_ensure_ai_enabled_allows_enabled_state(monkeypatch):
     monkeypatch.setattr(ai_sidecar, "_read_json", lambda path: {"aiEnabled": True})
 
     ai_sidecar._ensure_ai_enabled()
+
+
+def test_log_writes_to_patched_log_path(monkeypatch, tmp_path, capsys):
+    log_path = tmp_path / "ai_sidecar.log"
+    monkeypatch.setattr(ai_sidecar, "LOG_PATH", str(log_path))
+
+    ai_sidecar._log("HELLO")
+
+    stdout = capsys.readouterr().out.strip()
+    assert "AI_SIDECAR HELLO" in stdout
+    assert log_path.read_text(encoding="utf-8").strip() == stdout
 
 
 def test_chat_json_uses_ollama_native_chat_endpoint(monkeypatch):
@@ -479,6 +526,71 @@ def test_run_once_uses_persist_flag_and_write_signal_boundary(monkeypatch):
     assert written == [decision]
 
 
+def test_run_once_raises_when_no_payload(monkeypatch):
+    def fake_read_json(path):
+        if path == ai_sidecar.STATE_PATH:
+            return {"symbol": "BTCUSDT"}
+        if path == ai_sidecar.RUNTIME_PATH:
+            return {"market": {}}
+        if path == str(ai_sidecar.STATUS_PATH):
+            return {}
+        raise AssertionError(f"unexpected read: {path}")
+
+    monkeypatch.setattr(ai_sidecar, "_read_json", fake_read_json)
+    monkeypatch.setattr(
+        ai_sidecar,
+        "_run_multi_agent_decision",
+        lambda *args, **kwargs: pytest.fail("unexpected model decision"),
+    )
+
+    with pytest.raises(RuntimeError, match="No runtime payload"):
+        ai_sidecar._run_once(persist=False, write_signal=False)
+
+
+def test_run_once_skips_signal_write_when_not_requested(monkeypatch):
+    def fake_read_json(path):
+        if path == ai_sidecar.STATE_PATH:
+            return {"symbol": "BTCUSDT"}
+        if path == ai_sidecar.RUNTIME_PATH:
+            return {"market": {"price": 100.0}}
+        raise AssertionError(f"unexpected read: {path}")
+
+    monkeypatch.setattr(ai_sidecar, "_read_json", fake_read_json)
+    monkeypatch.setattr(
+        ai_sidecar,
+        "_run_multi_agent_decision",
+        lambda state, payload, *, persist: {"decisionId": "d1", "persist": persist},
+    )
+    monkeypatch.setattr(
+        ai_sidecar,
+        "_write_ai_signal",
+        lambda decision: pytest.fail("unexpected signal write"),
+    )
+
+    decision = ai_sidecar._run_once(persist=True, write_signal=False)
+
+    assert decision == {"decisionId": "d1", "persist": True}
+
+
+def test_query_model_delegates_with_persist_true(monkeypatch):
+    calls = []
+
+    def fake_run_multi_agent_decision(state, payload, *, persist):
+        calls.append({"state": state, "payload": payload, "persist": persist})
+        return {"decisionId": "d1"}
+
+    monkeypatch.setattr(
+        ai_sidecar,
+        "_run_multi_agent_decision",
+        fake_run_multi_agent_decision,
+    )
+    state = {"symbol": "BTCUSDT"}
+    payload = _minimal_payload()
+
+    assert ai_sidecar._query_model(state, payload) == {"decisionId": "d1"}
+    assert calls == [{"state": state, "payload": payload, "persist": True}]
+
+
 def test_run_multi_agent_decision_refreshes_and_injects_lessons(monkeypatch):
     lesson_calls = []
     agent_calls = []
@@ -585,6 +697,68 @@ def test_run_multi_agent_decision_refreshes_and_injects_lessons(monkeypatch):
     assert appended == []
 
 
+def test_run_multi_agent_decision_uses_synthetic_case_reports_when_templates_missing(
+    monkeypatch,
+    tmp_path,
+):
+    _patch_multi_agent_boundaries(monkeypatch)
+    monkeypatch.setattr(ai_sidecar, "TEMPLATE_DIR", tmp_path)
+    monkeypatch.setattr(
+        ai_sidecar,
+        "_chat_json",
+        lambda **kwargs: {
+            "riskAction": "allow_grid",
+            "confidence": 0.9,
+            "recommendedSpacingPct": 0.01,
+            "recommendedLevels": 12,
+            "recommendedMaxExposurePct": 0.25,
+            "riskBudgetPct": 0.25,
+        },
+    )
+
+    decision = ai_sidecar._run_multi_agent_decision(
+        {"symbol": "BTCUSDT", "gridMaxExposurePct": 0.35},
+        _minimal_payload() | {"openOrders": 3, "hasOpenPosition": False},
+        persist=False,
+    )
+
+    assert decision["reports"]["bull_case"]["raw"]["source"] == "deterministic_case_review"
+    assert decision["reports"]["bear_case"]["raw"]["source"] == "deterministic_case_review"
+
+
+def test_run_multi_agent_decision_persist_true_appends_local_decision(monkeypatch):
+    _patch_multi_agent_boundaries(monkeypatch)
+    appended = []
+
+    def fake_append(decision, *, prompts, reports):
+        appended.append({"decision": decision, "prompts": prompts, "reports": reports})
+
+    monkeypatch.setattr(ai_sidecar, "append_decision", fake_append)
+    monkeypatch.setattr(
+        ai_sidecar,
+        "_chat_json",
+        lambda **kwargs: {
+            "riskAction": "allow_grid",
+            "confidence": 0.9,
+            "recommendedSpacingPct": 0.01,
+            "recommendedLevels": 12,
+            "recommendedMaxExposurePct": 0.25,
+            "riskBudgetPct": 0.25,
+        },
+    )
+
+    decision = ai_sidecar._run_multi_agent_decision(
+        {"symbol": "BTCUSDT", "gridMaxExposurePct": 0.35},
+        _minimal_payload(),
+        persist=True,
+    )
+
+    assert len(appended) == 1
+    assert appended[0]["decision"] == decision
+    assert "portfolio_manager" in appended[0]["prompts"]
+    assert "market_regime" in appended[0]["reports"]
+
+
 def test_run_multi_agent_decision_uses_fallback_model(monkeypatch):
     _patch_multi_agent_boundaries(monkeypatch)
     state = {
@@ -644,6 +818,52 @@ def test_run_multi_agent_decision_uses_fallback_model(monkeypatch):
     assert decision["deepModel"] == "fallback"
     assert decision["riskAction"] == "pause_new_buys"
     assert appended == []
+
+
+def test_run_multi_agent_decision_persist_true_appends_fallback_model_decision(
+    monkeypatch,
+):
+    _patch_multi_agent_boundaries(monkeypatch)
+    appended = []
+
+    def fake_chat_json(*, state, model, messages, max_tokens=500):
+        if model == "deep":
+            raise RuntimeError("primary portfolio down")
+        return {
+            "riskAction": "pause_new_buys",
+            "confidence": 0.9,
+            "gridAllowed": False,
+            "pauseNewBuys": True,
+            "riskBudgetPct": 0.2,
+            "recommendedSpacingPct": 0.01,
+            "recommendedLevels": 10,
+            "recommendedMaxExposurePct": 0.2,
+            "recommendedMode": "scalpy",
+        }
+
+    def fake_append(decision, *, prompts, reports):
+        appended.append({"decision": decision, "prompts": prompts, "reports": reports})
+
+    monkeypatch.setattr(ai_sidecar, "_chat_json", fake_chat_json)
+    monkeypatch.setattr(ai_sidecar, "append_decision", fake_append)
+
+    decision = ai_sidecar._run_multi_agent_decision(
+        {
+            "symbol": "BTCUSDT",
+            "aiQuickModel": "quick",
+            "aiDeepModel": "deep",
+            "aiFallbackModel": "fallback",
+            "gridMaxExposurePct": 0.35,
+        },
+        _minimal_payload(),
+        persist=True,
+    )
+
+    assert decision["source"] == "local_ai_fallback_model"
+    assert len(appended) == 1
+    assert appended[0]["decision"] == decision
+    assert "portfolio_manager" in appended[0]["prompts"]
+    assert "market_regime" in appended[0]["reports"]
 
 
 def test_run_multi_agent_decision_uses_deterministic_fallback(monkeypatch):
