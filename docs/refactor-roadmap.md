@@ -46,14 +46,22 @@ checked explicitly with `python -m ruff check . --select E501`.
 
 ## Current Coverage Baseline
 
-Current local audit results:
+Current local audit results from `chore/coverage-gap-audit`:
 
-- Tests: 69 passed.
-- Coverage: 34% total.
-- Ruff: all configured checks passed.
+- Tests: 127 passed.
+- Coverage: 60% total; 1922 / 3192 statements covered, 1270 missed.
+- Ruff: passed.
+- Test `E501`: passed with
+  `python -m ruff check tests --select E501`.
 - Compileall: passed.
-- Deferred `E501` findings: 197 when checked explicitly with
-  `python -m ruff check . --select E501`.
+
+Highest-ROI next coverage branches:
+
+1. `test/dashboard-data-adapter-contracts`
+2. `test/ai-memory-contracts`
+3. `test/ai-sidecar-provider-boundaries`
+4. `test/dashboard-server-helper-contracts`
+5. `test/detached-wrapper-contracts`
 
 Coverage is informational only. It is low because much of the repository is
 still made of root-level runtime modules, service entry points, trading loops,
@@ -63,7 +71,9 @@ network calls, or trading state transitions at boundaries that need
 characterization before refactor.
 
 Coverage should remain informational until high-risk behavior is protected by
-targeted tests.
+targeted tests. The coverage threshold should remain `0` for now. Do not change
+the coverage omit config yet. `ai_playground.py` is a possible future omit
+candidate only after an explicit decision.
 
 ## Deferred Risks
 
