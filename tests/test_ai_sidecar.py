@@ -2,6 +2,56 @@ import ai_sidecar
 import pytest
 
 
+class _FakeResponse:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return self._payload
+
+
+def _minimal_payload():
+    return {
+        "symbol": "BTCUSDT",
+        "interval": "1m",
+        "price": 100.0,
+        "atrPct": 0.001,
+        "trendStrength": 0.001,
+    }
+
+
+def _fake_agent_report(role):
+    return {
+        "role": role,
+        "summary": f"{role} summary",
+        "confidence": 0.5,
+        "risk_score": 0.1,
+        "recommendation": "hold",
+        "evidence": [],
+        "raw": {},
+    }
+
+
+def _patch_multi_agent_boundaries(monkeypatch):
+    monkeypatch.setattr(ai_sidecar, "_log", lambda msg: None)
+    monkeypatch.setattr(ai_sidecar, "_ensure_ai_enabled", lambda: None)
+    monkeypatch.setattr(ai_sidecar, "update_lessons_from_trades", lambda: 0)
+    monkeypatch.setattr(ai_sidecar, "recent_lessons", lambda symbol: "LESSONS")
+    monkeypatch.setattr(
+        ai_sidecar,
+        "_load_template",
+        lambda name: "{role} {payload_json} {lessons} {reports_json}",
+    )
+
+    def fake_run_agent(*, role, template, state, payload, model, lessons, reports=None):
+        return _fake_agent_report(role)
+
+    monkeypatch.setattr(ai_sidecar, "_run_agent", fake_run_agent)
+
+
 def test_safe_number_helpers_use_defaults():
     assert ai_sidecar._safe_float("1.25") == 1.25
     assert ai_sidecar._safe_float("bad", default=9.5) == 9.5
@@ -210,6 +260,175 @@ def test_ensure_ai_enabled_allows_enabled_state(monkeypatch):
     ai_sidecar._ensure_ai_enabled()
 
 
+def test_chat_json_uses_ollama_native_chat_endpoint(monkeypatch):
+    calls = []
+    messages = [{"role": "user", "content": "hi"}]
+    monkeypatch.setattr(ai_sidecar, "_ensure_ai_enabled", lambda: None)
+
+    def fake_post(url, *, json, timeout, headers=None):
+        calls.append({"url": url, "json": json, "timeout": timeout, "headers": headers})
+        return _FakeResponse({
+            "message": {"content": 'prefix {"ok": true, "value": 3} suffix'},
+        })
+
+    monkeypatch.setattr(ai_sidecar.requests, "post", fake_post)
+
+    result = ai_sidecar._chat_json(
+        state={
+            "aiProvider": "ollama",
+            "aiBaseUrl": "http://ollama.local:11434/v1",
+            "aiTemperature": "0.25",
+            "aiTimeoutSeconds": 3,
+        },
+        model="qwen",
+        messages=messages,
+        max_tokens=123,
+    )
+
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["url"] == "http://ollama.local:11434/api/chat"
+    assert call["headers"] is None
+    assert call["timeout"] == 3.0
+    assert call["json"]["model"] == "qwen"
+    assert call["json"]["messages"] == messages
+    assert call["json"]["stream"] is False
+    assert call["json"]["think"] is False
+    assert call["json"]["options"] == {"temperature": 0.25, "num_predict": 123}
+    assert result["ok"] is True
+    assert result["value"] == 3
+    assert result["_latencySeconds"] >= 0
+
+
+def test_chat_json_uses_openai_compatible_chat_completions(monkeypatch):
+    calls = []
+    messages = [{"role": "user", "content": "hi"}]
+    monkeypatch.setattr(ai_sidecar, "_ensure_ai_enabled", lambda: None)
+
+    def fake_post(url, *, json, headers, timeout):
+        calls.append({"url": url, "json": json, "headers": headers, "timeout": timeout})
+        return _FakeResponse({
+            "choices": [{"message": {"content": '{"riskAction": "hold"}'}}],
+        })
+
+    monkeypatch.setattr(ai_sidecar.requests, "post", fake_post)
+
+    result = ai_sidecar._chat_json(
+        state={
+            "aiProvider": "openai",
+            "aiBaseUrl": "http://model.local/v1",
+            "aiTemperature": "0.4",
+            "aiTimeoutSeconds": 4,
+        },
+        model="gpt-local",
+        messages=messages,
+        max_tokens=77,
+    )
+
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["url"] == "http://model.local/v1/chat/completions"
+    assert call["timeout"] == 4.0
+    assert call["headers"] == {
+        "Authorization": "Bearer local",
+        "Content-Type": "application/json",
+    }
+    assert call["json"] == {
+        "model": "gpt-local",
+        "messages": messages,
+        "temperature": 0.4,
+        "max_tokens": 77,
+        "stream": False,
+    }
+    assert result["riskAction"] == "hold"
+    assert result["_latencySeconds"] >= 0
+
+
+@pytest.mark.parametrize(
+    ("state", "payload"),
+    [
+        (
+            {"aiProvider": "ollama", "aiBaseUrl": "http://host:11434/v1"},
+            {"message": {"content": ""}},
+        ),
+        (
+            {"aiProvider": "openai", "aiBaseUrl": "http://host/v1"},
+            {"choices": [{"message": {"content": "no json here"}}]},
+        ),
+    ],
+)
+def test_chat_json_raises_when_response_has_no_json_object(
+    monkeypatch,
+    state,
+    payload,
+):
+    monkeypatch.setattr(ai_sidecar, "_ensure_ai_enabled", lambda: None)
+    monkeypatch.setattr(
+        ai_sidecar.requests,
+        "post",
+        lambda *args, **kwargs: _FakeResponse(payload),
+    )
+
+    with pytest.raises(ValueError, match="No JSON object"):
+        ai_sidecar._chat_json(
+            state=state,
+            model="model",
+            messages=[{"role": "user", "content": "hi"}],
+        )
+
+
+def test_run_agent_formats_prompt_and_returns_report(monkeypatch):
+    captured = {}
+
+    def fake_chat_json(*, state, model, messages, max_tokens=500):
+        captured.update(
+            {
+                "state": state,
+                "model": model,
+                "messages": messages,
+                "max_tokens": max_tokens,
+            },
+        )
+        return {
+            "summary": "ok",
+            "confidence": 0.7,
+            "riskScore": 0.3,
+            "recommendation": "hold",
+            "evidence": ["fee risk"],
+        }
+
+    monkeypatch.setattr(ai_sidecar, "_chat_json", fake_chat_json)
+    state = {"marker": "state"}
+
+    report = ai_sidecar._run_agent(
+        role="grid_risk",
+        template=(
+            "role={role}; payload={payload_json}; "
+            "lessons={lessons}; reports={reports_json}"
+        ),
+        state=state,
+        payload={"b": 2, "a": 1},
+        model="quick",
+        lessons="LESSON TEXT",
+        reports={"market_regime": {"risk_score": 0.2}},
+    )
+
+    assert captured["state"] is state
+    assert captured["model"] == "quick"
+    assert captured["max_tokens"] == 420
+    assert captured["messages"][0]["role"] == "system"
+    assert "Return one JSON object only" in captured["messages"][0]["content"]
+    prompt = captured["messages"][1]["content"]
+    assert "role=grid_risk" in prompt
+    assert 'payload={"a": 1, "b": 2}' in prompt
+    assert "lessons=LESSON TEXT" in prompt
+    assert 'reports={"market_regime": {"risk_score": 0.2}}' in prompt
+    assert report["role"] == "grid_risk"
+    assert report["confidence"] == 0.7
+    assert report["risk_score"] == 0.3
+    assert report["raw"]["summary"] == "ok"
+
+
 def test_run_once_uses_persist_flag_and_write_signal_boundary(monkeypatch):
     state = {"symbol": "BTCUSDT"}
     runtime = {
@@ -364,3 +583,126 @@ def test_run_multi_agent_decision_refreshes_and_injects_lessons(monkeypatch):
     assert "LESSON TEXT" in portfolio_prompts[0]
     assert decision["source"] == "local_multi_agent"
     assert appended == []
+
+
+def test_run_multi_agent_decision_uses_fallback_model(monkeypatch):
+    _patch_multi_agent_boundaries(monkeypatch)
+    state = {
+        "symbol": "BTCUSDT",
+        "aiProvider": "openai",
+        "aiBaseUrl": "http://model.local/v1",
+        "aiModel": "primary",
+        "aiQuickModel": "quick",
+        "aiDeepModel": "deep",
+        "aiFallbackModel": "fallback",
+        "gridMaxExposurePct": 0.35,
+    }
+    chat_calls = []
+    appended = []
+
+    def fake_chat_json(*, state, model, messages, max_tokens=500):
+        chat_calls.append({"state": state, "model": model, "max_tokens": max_tokens})
+        if model == "deep":
+            raise RuntimeError("primary portfolio down")
+        assert model == "fallback"
+        return {
+            "riskAction": "pause_new_buys",
+            "regime": "range",
+            "directionBias": "neutral",
+            "confidence": 0.9,
+            "breakoutRisk": 0.2,
+            "gridAllowed": False,
+            "pauseNewBuys": True,
+            "riskBudgetPct": 0.2,
+            "recommendedSpacingPct": 0.01,
+            "recommendedLevels": 10,
+            "recommendedMaxExposurePct": 0.2,
+            "recommendedMode": "scalpy",
+            "rationale": "fallback ok",
+            "keyRisks": [],
+        }
+
+    monkeypatch.setattr(ai_sidecar, "_chat_json", fake_chat_json)
+    monkeypatch.setattr(
+        ai_sidecar,
+        "append_decision",
+        lambda *args, **kwargs: appended.append((args, kwargs)),
+    )
+
+    decision = ai_sidecar._run_multi_agent_decision(
+        state,
+        _minimal_payload(),
+        persist=False,
+    )
+
+    assert [call["model"] for call in chat_calls] == ["deep", "fallback"]
+    assert chat_calls[1]["state"]["aiQuickModel"] == "fallback"
+    assert decision["source"] == "local_ai_fallback_model"
+    assert decision["fallbackFrom"] == "deep"
+    assert decision["model"] == "fallback"
+    assert decision["quickModel"] == "fallback"
+    assert decision["deepModel"] == "fallback"
+    assert decision["riskAction"] == "pause_new_buys"
+    assert appended == []
+
+
+def test_run_multi_agent_decision_uses_deterministic_fallback(monkeypatch):
+    _patch_multi_agent_boundaries(monkeypatch)
+    state = {
+        "symbol": "BTCUSDT",
+        "aiQuickModel": "quick",
+        "aiDeepModel": "deep",
+        "aiFallbackModel": "fallback",
+        "gridMaxExposurePct": 0.35,
+    }
+    chat_models = []
+    appended = []
+
+    def fake_chat_json(*, state, model, messages, max_tokens=500):
+        chat_models.append(model)
+        raise RuntimeError(f"{model} down")
+
+    monkeypatch.setattr(ai_sidecar, "_chat_json", fake_chat_json)
+    monkeypatch.setattr(
+        ai_sidecar,
+        "append_decision",
+        lambda *args, **kwargs: appended.append((args, kwargs)),
+    )
+
+    decision = ai_sidecar._run_multi_agent_decision(
+        state,
+        _minimal_payload(),
+        persist=False,
+    )
+
+    assert chat_models == ["deep", "fallback"]
+    assert decision["source"] == "deterministic_fallback"
+    assert decision["error"] == "fallback down"
+    assert decision["keyRisks"] == ["fallback down"]
+    assert appended == []
+
+
+def test_run_multi_agent_decision_reraises_ai_disabled(monkeypatch):
+    logs = []
+
+    def disabled():
+        raise ai_sidecar.AiDisabled("off")
+
+    monkeypatch.setattr(ai_sidecar, "_log", logs.append)
+    monkeypatch.setattr(ai_sidecar, "_ensure_ai_enabled", disabled)
+    monkeypatch.setattr(ai_sidecar, "update_lessons_from_trades", lambda: 0)
+    monkeypatch.setattr(ai_sidecar, "recent_lessons", lambda symbol: "LESSONS")
+    monkeypatch.setattr(
+        ai_sidecar,
+        "_chat_json",
+        lambda **kwargs: pytest.fail("unexpected model call"),
+    )
+
+    with pytest.raises(ai_sidecar.AiDisabled, match="off"):
+        ai_sidecar._run_multi_agent_decision(
+            {"symbol": "BTCUSDT"},
+            _minimal_payload(),
+            persist=False,
+        )
+
+    assert logs == ["ABORT_DISABLED"]
