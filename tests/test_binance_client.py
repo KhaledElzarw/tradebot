@@ -65,6 +65,39 @@ def test_klines_uses_unsigned_get_path_and_params(monkeypatch):
     assert session.responses[0].raise_for_status_called is True
 
 
+def test_basic_public_endpoints_use_unsigned_gets(monkeypatch):
+    client, session = _client_with_fake_session(monkeypatch, payload={"ok": True})
+
+    assert client.ping() == {"ok": True}
+    assert client.server_time() == {"ok": True}
+    assert client.exchange_info() == {"ok": True}
+    assert client.exchange_info("BTCUSDT") == {"ok": True}
+
+    assert session.get_calls == [
+        {
+            "url": "https://api.example.test/api/v3/ping",
+            "params": {},
+            "timeout": 7,
+        },
+        {
+            "url": "https://api.example.test/api/v3/time",
+            "params": {},
+            "timeout": 7,
+        },
+        {
+            "url": "https://api.example.test/api/v3/exchangeInfo",
+            "params": {},
+            "timeout": 7,
+        },
+        {
+            "url": "https://api.example.test/api/v3/exchangeInfo",
+            "params": {"symbol": "BTCUSDT"},
+            "timeout": 7,
+        },
+    ]
+    assert all(response.raise_for_status_called for response in session.responses)
+
+
 def test_account_uses_signed_get_with_timestamp_and_signature(monkeypatch):
     monkeypatch.setattr(binance_client.time, "time", lambda: 1234567890.0)
     client, session = _client_with_fake_session(monkeypatch, payload={"balances": []})
@@ -125,3 +158,25 @@ def test_new_order_posts_signed_form_params(monkeypatch):
         "recvWindow": ["5000"],
         "signature": ["22de62d3387fd9f20b5ce1eb5368f62a304d7184a6e86531d296c2ea910d96cd"],
     }
+
+
+def test_post_can_send_unsigned_form_params(monkeypatch):
+    client, session = _client_with_fake_session(monkeypatch, payload={"listenKey": "abc"})
+
+    result = client._post(
+        "/api/v3/userDataStream",
+        params={"symbol": "BTCUSDT", "limit": 5},
+        signed=False,
+    )
+
+    assert result == {"listenKey": "abc"}
+    assert session.post_calls[0]["url"] == "https://api.example.test/api/v3/userDataStream"
+    assert session.post_calls[0]["timeout"] == 7
+    assert session.post_calls[0]["headers"] == {
+        "Content-Type": "application/x-www-form-urlencoded",
+    }
+    assert parse_qs(session.post_calls[0]["data"]) == {
+        "symbol": ["BTCUSDT"],
+        "limit": ["5"],
+    }
+    assert session.responses[0].raise_for_status_called is True
