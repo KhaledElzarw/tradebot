@@ -429,6 +429,54 @@ def test_resolve_grid_mode_rejects_invalid_state_mode():
         engine._resolve_grid_mode({"gridMode": "flexy"}, {}, ai_live=False)
 
 
+@pytest.mark.parametrize("btc", [0.0, -0.1])
+def test_position_payload_returns_none_without_btc(btc):
+    paper = engine.PaperAccount(usdt=100.0, btc=btc)
+
+    assert engine._position_payload(paper, None, price=120.0) is None
+
+
+def test_position_payload_reports_grid_cost_basis_unrealized_fields():
+    paper = engine.PaperAccount(usdt=100.0, btc=0.5)
+    grid = engine.GridState(
+        anchor=100.0,
+        spacing_pct=0.01,
+        levels=2,
+        max_exposure_pct=0.5,
+        reserved_usdt=25.0,
+        reserved_btc=0.5,
+        cost_basis_usdt=50.0,
+        orders=[],
+        active=True,
+        last_recenter_utc="2026-05-06T00:00:00+00:00",
+    )
+    grid.__dict__["trail_stop"] = 95.0
+
+    assert engine._position_payload(paper, grid, price=120.0) == {
+        "entryPrice": 100.0,
+        "qtyBtc": 0.5,
+        "stop": 95.0,
+        "tp": None,
+        "entryTimeUtc": "2026-05-06T00:00:00+00:00",
+        "unrealizedPnlUsdt": 10.0,
+        "unrealizedPnlPct": pytest.approx(0.2),
+    }
+
+
+def test_position_payload_without_grid_uses_zero_unrealized_fields():
+    paper = engine.PaperAccount(usdt=100.0, btc=0.5)
+
+    assert engine._position_payload(paper, None, price=120.0) == {
+        "entryPrice": None,
+        "qtyBtc": 0.5,
+        "stop": None,
+        "tp": None,
+        "entryTimeUtc": None,
+        "unrealizedPnlUsdt": 0.0,
+        "unrealizedPnlPct": 0.0,
+    }
+
+
 def test_grid_telemetry_reports_effective_ai_mode_and_preserves_inputs():
     payload = engine._grid_telemetry(
         state={"gridMode": "scalpy"},
