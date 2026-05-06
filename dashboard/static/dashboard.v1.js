@@ -1581,14 +1581,16 @@ async function refresh() {
     stateUi.lastRuntime = runtime;
     stateUi.lastCumulative = cumulative;
     stateUi.lastOrders = ((runtime.grid || {}).orders || []).slice();
-    document.getElementById('bot-toggle-btn').textContent = state.paused ? '▶' : '⏸';
+    setTextIfPresent('bot-toggle-btn', state.paused ? '▶' : '⏸');
     const aiEnabled = state.aiEnabled !== false;
     const aiToggle = document.getElementById('ai-toggle-btn');
-    aiToggle.textContent = aiEnabled ? 'AI On' : 'AI Off';
-    aiToggle.classList.toggle('ai-on', aiEnabled);
-    aiToggle.classList.toggle('ai-off', !aiEnabled);
-    document.getElementById('fresh-label').textContent = freshnessSeconds != null ? `Live payload • ${humanAge(freshnessSeconds)}` : 'No timestamp';
-    document.getElementById('server-time').textContent = fmtDate(serverTimeUtc);
+    if (aiToggle) {
+      aiToggle.textContent = aiEnabled ? 'AI On' : 'AI Off';
+      aiToggle.classList.toggle('ai-on', aiEnabled);
+      aiToggle.classList.toggle('ai-off', !aiEnabled);
+    }
+    setTextIfPresent('fresh-label', freshnessSeconds != null ? `Live payload • ${humanAge(freshnessSeconds)}` : 'No timestamp');
+    setTextIfPresent('server-time', fmtDate(serverTimeUtc));
     safeRender('summary', () => renderStickySummary(status, cumulative, runtime, grid));
     safeRender('status', () => renderLiveStatusFooter(status, state, runtime, data, grid));
     safeRender('events', () => renderEvents((events || []).slice().reverse()));
@@ -1597,11 +1599,13 @@ async function refresh() {
     safeRender('intelligence', () => renderIntelligence(status, cumulative, runtime, intelligence));
     safeRender('regime', () => renderRegime(status, runtime, intelligence));
     safeRender('calendar', () => renderMacroCalendar());
-    document.getElementById('orders-filter-buy-btn').style.color = '#35d08a';
-    document.getElementById('orders-filter-sell-btn').style.color = '#ff6b81';
+    const buyFilter = document.getElementById('orders-filter-buy-btn');
+    if (buyFilter) buyFilter.style.color = '#35d08a';
+    const sellFilter = document.getElementById('orders-filter-sell-btn');
+    if (sellFilter) sellFilter.style.color = '#ff6b81';
     populateConfigForm(state, aiModels || []);
   } catch (err) {
-    document.getElementById('fresh-label').textContent = `Dashboard fetch error • ${err.message || err}`;
+    setTextIfPresent('fresh-label', `Dashboard fetch error • ${err.message || err}`);
   } finally {
     stateUi.refreshInFlight = false;
   }
