@@ -792,6 +792,27 @@ def _grid_telemetry(
     return payload
 
 
+def _position_payload(paper: PaperAccount, grid: GridState | None, price: float) -> dict | None:
+    if paper.btc <= 0:
+        return None
+    unreal = 0.0
+    unreal_pct = 0.0
+    if grid and grid.cost_basis_usdt > 0:
+        mkt_value = paper.btc * price
+        unreal = mkt_value - grid.cost_basis_usdt
+        avg_cost = grid.cost_basis_usdt / paper.btc if paper.btc else 0.0
+        unreal_pct = (price / avg_cost - 1.0) if avg_cost else 0.0
+    return {
+        "entryPrice": (grid.cost_basis_usdt / paper.btc) if (grid and paper.btc > 0) else None,
+        "qtyBtc": paper.btc,
+        "stop": float((grid.__dict__.get("trail_stop", 0.0) or 0.0)) if grid else None,
+        "tp": None,
+        "entryTimeUtc": grid.last_recenter_utc if grid else None,
+        "unrealizedPnlUsdt": unreal,
+        "unrealizedPnlPct": unreal_pct,
+    }
+
+
 def _spacing_for_mode(mode: str | None, atr: float, price: float, *, min_scalpy: float, min_fatty: float) -> tuple[float, int]:
     # Return (spacing_pct, levels)
     # NOTE: With 10bps fees, a full cycle (buy+sell) costs ~20bps, so spacing must be well above 0.20%.
@@ -1125,13 +1146,6 @@ def main():
             exits_count = sum(1 for ev in event_rows if ev.get("event") == "EXIT")
             has_open_position = paper.btc > 0
             cum = _read_cum()
-            unreal = 0.0
-            unreal_pct = 0.0
-            if paper.btc > 0 and grid and grid.cost_basis_usdt > 0:
-                mkt_value = paper.btc * price
-                unreal = mkt_value - grid.cost_basis_usdt
-                avg_cost = grid.cost_basis_usdt / paper.btc if paper.btc else 0.0
-                unreal_pct = (price / avg_cost - 1.0) if avg_cost else 0.0
             _write_status({
                 "tsUtc": _utc_now().isoformat(),
                 "mode": state.get("mode"),
@@ -1141,15 +1155,7 @@ def main():
                 "equityUsdt": paper.equity(price),
                 "usdt": paper.usdt,
                 "btc": paper.btc,
-                "position": None if paper.btc <= 0 else {
-                    "entryPrice": (grid.cost_basis_usdt / paper.btc) if (grid and paper.btc > 0) else None,
-                    "qtyBtc": paper.btc,
-                    "stop": float((grid.__dict__.get("trail_stop", 0.0) or 0.0)) if grid else None,
-                    "tp": None,
-                    "entryTimeUtc": grid.last_recenter_utc if grid else None,
-                    "unrealizedPnlUsdt": unreal,
-                    "unrealizedPnlPct": unreal_pct,
-                },
+                "position": _position_payload(paper, grid, price),
                 "stats": {
                     "day": stats.day,
                     "trades": int(cum.get("trades", stats.trades)),
@@ -1186,13 +1192,6 @@ def main():
 
         # Keep dashboard status fresh while inactive; runtime snapshots are gated below.
         if inactive_reason:
-            unreal = 0.0
-            unreal_pct = 0.0
-            if paper.btc > 0 and grid and grid.cost_basis_usdt > 0:
-                mkt_value = paper.btc * price
-                unreal = mkt_value - grid.cost_basis_usdt
-                avg_cost = grid.cost_basis_usdt / paper.btc if paper.btc else 0.0
-                unreal_pct = (price / avg_cost - 1.0) if avg_cost else 0.0
             event_rows = _load_trade_events()
             entries_count = sum(1 for ev in event_rows if ev.get("event") == "ENTER")
             exits_count = sum(1 for ev in event_rows if ev.get("event") == "EXIT")
@@ -1207,15 +1206,7 @@ def main():
                 "equityUsdt": paper.equity(price),
                 "usdt": paper.usdt,
                 "btc": paper.btc,
-                "position": None if paper.btc <= 0 else {
-                    "entryPrice": (grid.cost_basis_usdt / paper.btc) if (grid and paper.btc > 0) else None,
-                    "qtyBtc": paper.btc,
-                    "stop": float((grid.__dict__.get("trail_stop", 0.0) or 0.0)) if grid else None,
-                    "tp": None,
-                    "entryTimeUtc": grid.last_recenter_utc if grid else None,
-                    "unrealizedPnlUsdt": unreal,
-                    "unrealizedPnlPct": unreal_pct,
-                },
+                "position": _position_payload(paper, grid, price),
                 "stats": {
                     "day": stats.day,
                     "trades": int(cum.get("trades", stats.trades)),
@@ -1740,14 +1731,6 @@ def main():
                     grid.orders.append(GridOrder(side="BUY", price=new_px, qty_btc=o.qty_btc))
 
         # Update status every tick
-        unreal = 0.0
-        unreal_pct = 0.0
-        if paper.btc > 0 and grid and grid.cost_basis_usdt > 0:
-            mkt_value = paper.btc * price
-            unreal = mkt_value - grid.cost_basis_usdt
-            avg_cost = grid.cost_basis_usdt / paper.btc if paper.btc else 0.0
-            unreal_pct = (price / avg_cost - 1.0) if avg_cost else 0.0
-
         event_rows = _load_trade_events()
         entries_count = sum(1 for ev in event_rows if ev.get("event") == "ENTER")
         exits_count = sum(1 for ev in event_rows if ev.get("event") == "EXIT")
@@ -1762,15 +1745,7 @@ def main():
             "equityUsdt": paper.equity(price),
             "usdt": paper.usdt,
             "btc": paper.btc,
-            "position": None if paper.btc <= 0 else {
-                "entryPrice": (grid.cost_basis_usdt / paper.btc) if (grid and paper.btc > 0) else None,
-                "qtyBtc": paper.btc,
-                "stop": float((grid.__dict__.get("trail_stop", 0.0) or 0.0)) if grid else None,
-                "tp": None,
-                "entryTimeUtc": grid.last_recenter_utc if grid else None,
-                "unrealizedPnlUsdt": unreal,
-                "unrealizedPnlPct": unreal_pct,
-            },
+            "position": _position_payload(paper, grid, price),
             "stats": {
                 "day": stats.day,
                 "trades": stats.trades,
