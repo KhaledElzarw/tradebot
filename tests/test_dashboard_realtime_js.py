@@ -169,6 +169,202 @@ def test_dashboard_boot_tolerates_cards_without_heads(tmp_path):
     assert result.returncode == 0, result.stderr
 
 
+def test_refresh_tolerates_missing_optional_refresh_controls(tmp_path):
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for dashboard JS unit test")
+
+    harness = r"""
+    const assert = require('assert');
+    const vm = require('vm');
+    const script = process.env.DASHBOARD_SCRIPT;
+
+    function makeElement(id) {
+      const ctx = {
+        scale(){}, clearRect(){}, beginPath(){}, arc(){}, stroke(){}, fillText(){},
+        fillRect(){}, moveTo(){}, lineTo(){}, strokeRect(){}, closePath(){}, fill(){},
+      };
+      return {
+        id,
+        tagName: id === 'top-timeframe' ? 'A' : 'DIV',
+        href: '',
+        textContent: '',
+        innerHTML: '',
+        children: [],
+        disabled: false,
+        value: '',
+        style: {},
+        dataset: {},
+        className: '',
+        classList: { toggle(){}, add(){}, remove(){} },
+        addEventListener(){},
+        appendChild(child){ this.children.push(child); },
+        querySelector(){ return null; },
+        querySelectorAll(){ return []; },
+        getBoundingClientRect(){ return { width: 1200, height: 520, left: 0, top: 0 }; },
+        getContext(){ return ctx; },
+        parentElement: { querySelector(){ return { remove(){} }; } },
+      };
+    }
+
+    const ids = [
+      'theme-toggle','bot-toggle-btn','ai-toggle-btn','reset-layout-btn',
+      'events-first-btn','events-prev-btn','events-next-btn','events-last-btn',
+      'orders-tab-open-btn','orders-tab-history-btn','orders-filter-buy-btn',
+      'orders-filter-sell-btn','orders-first-btn','orders-prev-btn',
+      'orders-next-btn','orders-last-btn','config-save-btn','dashboard',
+      'summary-card','market-card','intelligence-card','regime-card','macro-card',
+      'events-card','orders-card','config-card','status-card','fresh-label',
+      'server-time','sticky-summary','trading-state-label','state-mode',
+      'state-risk','state-exposure','state-action','chart-price-pill',
+      'chart-quote-line','status-list','events-body','events-page-indicator',
+      'orders-body','orders-page-indicator','timeframe-controls','news-stack',
+      'signal-table','final-regime-title','final-regime-copy','regime-updated',
+      'macro-calendar','config-form-grid','market-legend','hover-ohlcv',
+      'latest-candle','market-chart','chart-stream-status','boot-error',
+      'top-timeframe'
+    ];
+    const elements = new Map(ids.map(id => [id, makeElement(id)]));
+    const cards = [
+      'summary-card','market-card','intelligence-card','regime-card','macro-card',
+      'events-card','orders-card','config-card','status-card',
+    ].map(id => elements.get(id));
+    cards.forEach(card => {
+      card.dataset.defaultSpan = '8';
+      card.dataset.defaultCol = '1';
+      card.parentElement = { children: cards, querySelector(){ return null; } };
+      card.querySelector = sel => {
+        if (sel === '.card-head') return makeElement(card.id + '-head');
+        if (sel === '.resize-handle') return null;
+        return null;
+      };
+      card.querySelectorAll = () => [];
+    });
+    const dashboard = elements.get('dashboard');
+    dashboard.querySelectorAll = sel => sel === '.card' ? cards : [];
+
+    const sample = {
+      status: {
+        tsUtc: '2026-05-01T00:00:00+00:00',
+        symbol: 'BTCUSDT',
+        price: 100,
+        equityUsdt: 500,
+        btc: 0.1,
+        usdt: 490,
+        stats: { grid: {}, ai: {} },
+        position: {},
+      },
+      state: {
+        paused: false,
+        aiEnabled: false,
+        symbol: 'BTCUSDT',
+        interval: '1m',
+        gridMode: 'scalpy',
+      },
+      runtime: { savedAt: '2026-05-01T00:00:00+00:00', grid: { orders: [] } },
+      cumulative: { realizedPnlUsdt: 0, feesPaidUsdt: 0 },
+      events: [],
+      ohlcv: [],
+      freshnessSeconds: 0.1,
+      serverTimeUtc: '2026-05-01T00:00:00+00:00',
+      seq: 1,
+      serverInstanceId: 'server-1',
+      channel: 'dashboard',
+      aiModels: [],
+      aiEndpoints: [],
+      aiEndpointModels: {},
+      intelligence: {},
+      refreshMs: 1000,
+      dashboardRefreshMs: 60000,
+    };
+
+    const sandbox = {
+      console,
+      URL,
+      URLSearchParams,
+      Number,
+      Math,
+      Date,
+      JSON,
+      Object,
+      Array,
+      Set,
+      Map,
+      String,
+      Error,
+      AbortController,
+      devicePixelRatio: 1,
+      localStorage: { getItem(){ return null; }, setItem(){}, removeItem(){} },
+      history: { replaceState(){} },
+      document: {
+        hidden: false,
+        body: { classList: { toggle(){}, add(){}, remove(){} } },
+        getElementById(id){ return elements.get(id) || null; },
+        createElement(tag){ return makeElement(tag); },
+        querySelector(){ return null; },
+        querySelectorAll(sel){ return sel === '.card' ? cards : []; },
+        addEventListener(){},
+      },
+      window: {
+        location: {
+          href: 'http://localhost/?interval=1m',
+          origin: 'http://localhost',
+          protocol: 'http:',
+          host: 'localhost',
+          pathname: '/',
+          search: '?interval=1m',
+        },
+        addEventListener(){},
+      },
+      requestAnimationFrame(fn){ fn(); return 1; },
+      cancelAnimationFrame(){},
+      setInterval(){ return 1; },
+      clearInterval(){},
+      setTimeout(){ return 1; },
+      clearTimeout(){},
+      getComputedStyle(){ return { getPropertyValue(){ return '#111'; } }; },
+      fetch(){ return Promise.resolve({ ok: true, json: async () => sample }); },
+      WebSocket: function(){ return { addEventListener(){}, close(){} }; },
+      EventSource: function(){ return { addEventListener(){}, close(){} }; },
+    };
+    sandbox.globalThis = sandbox;
+    vm.createContext(sandbox);
+    vm.runInContext(script + `
+      globalThis.__refreshTest = {
+        refresh,
+        stateUi,
+      };
+    `, sandbox);
+
+    [
+      'bot-toggle-btn',
+      'ai-toggle-btn',
+      'fresh-label',
+      'server-time',
+      'orders-filter-buy-btn',
+      'orders-filter-sell-btn',
+    ].forEach(id => elements.delete(id));
+
+    (async () => {
+      const t = sandbox.__refreshTest;
+      await assert.doesNotReject(async () => t.refresh());
+      assert.strictEqual(t.stateUi.refreshInFlight, false);
+    })().catch(err => {
+      console.error(err);
+      process.exit(1);
+    });
+    """
+    result = subprocess.run(
+        [node, "-e", textwrap.dedent(harness)],
+        cwd=".",
+        env={"DASHBOARD_SCRIPT": _dashboard_script()},
+        text=True,
+        capture_output=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_summary_and_chart_renderers_tolerate_missing_optional_targets(tmp_path):
     node = shutil.which("node")
     if not node:
