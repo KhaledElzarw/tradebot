@@ -1152,6 +1152,15 @@ def _compute_grid_plan(
     }
 
 
+def _spacing_fee_floor_decision(state: dict, spacing_pct: float) -> tuple[bool, float]:
+    fee_rate = float(state.get("feeBps", 10)) / 10_000.0
+    min_edge_spacing = max(
+        float(state.get("gridMinSpacingPctScalpy", 0.006)),
+        (2.0 * fee_rate) + float(state.get("gridTrailMinNetProfitPct", 0.0010)),
+    )
+    return spacing_pct < min_edge_spacing, min_edge_spacing
+
+
 def _build_grid_orders(anchor: float, spacing_pct: float, levels: int, qty_per_level: float) -> list[GridOrder]:
     orders: list[GridOrder] = []
     for i in range(1, levels + 1):
@@ -1737,12 +1746,8 @@ def main():
 
             # Refuse to initialize a fresh grid if the spacing is too tight to overcome round-trip fees.
             # This prevents churn in low-volatility conditions where gross grid capture is mostly consumed by fees.
-            fee_rate = float(state.get("feeBps", 10)) / 10_000.0
-            min_edge_spacing = max(
-                float(state.get("gridMinSpacingPctScalpy", 0.006)),
-                (2.0 * fee_rate) + float(state.get("gridTrailMinNetProfitPct", 0.0010)),
-            )
-            if spacing_pct < min_edge_spacing:
+            spacing_below_fee_floor, min_edge_spacing = _spacing_fee_floor_decision(state, spacing_pct)
+            if spacing_below_fee_floor:
                 _write_status(_status_payload(
                     state=state,
                     symbol=symbol,
