@@ -779,6 +779,49 @@ def _spacing_for_mode(mode: str | None, atr: float, price: float, *, min_scalpy:
     raise _grid_mode_error(mode)
 
 
+def _compute_grid_plan(
+    state: dict,
+    ai_signal: dict,
+    ai_live: bool,
+    *,
+    grid_mode: str,
+    atr: float,
+    price: float,
+) -> dict:
+    min_scalpy = float(state.get("gridMinSpacingPctScalpy", 0.006))
+    min_fatty = float(state.get("gridMinSpacingPctFatty", 0.010))
+    spacing_pct, levels = _spacing_for_mode(
+        grid_mode,
+        atr=atr,
+        price=price,
+        min_scalpy=min_scalpy,
+        min_fatty=min_fatty,
+    )
+    if ai_live:
+        spacing_pct = _clamp(
+            float(ai_signal.get("recommendedSpacingPct", spacing_pct) or spacing_pct),
+            max(min_scalpy / 2, 0.003),
+            0.03,
+        )
+        levels = int(_clamp(float(ai_signal.get("recommendedLevels", levels) or levels), 4, 24))
+    max_expo = float(state.get("gridMaxExposurePct", 0.10))
+    if ai_live:
+        max_expo = _clamp(float(ai_signal.get("recommendedMaxExposurePct", max_expo) or max_expo), 0.05, 0.60)
+        if ai_signal.get("reduceExposure"):
+            max_expo = min(
+                max_expo,
+                _clamp(float(ai_signal.get("riskBudgetPct", max_expo) or max_expo), 0.0, 0.60),
+            )
+
+    return {
+        "spacing_pct": spacing_pct,
+        "levels": levels,
+        "max_expo": max_expo,
+        "min_scalpy": min_scalpy,
+        "min_fatty": min_fatty,
+    }
+
+
 def _build_grid_orders(anchor: float, spacing_pct: float, levels: int, qty_per_level: float) -> list[GridOrder]:
     orders: list[GridOrder] = []
     for i in range(1, levels + 1):
@@ -1390,17 +1433,17 @@ def main():
 
         # IMPORTANT: do NOT auto-reinitialize the grid on tiny ATR/spacing drift.
         # That was causing repeated re-buys and corrupt cost basis / unrealized PnL.
-        min_scalpy = float(state.get("gridMinSpacingPctScalpy", 0.006))
-        min_fatty = float(state.get("gridMinSpacingPctFatty", 0.010))
-        spacing_pct, levels = _spacing_for_mode(grid_mode, atr=atr, price=price, min_scalpy=min_scalpy, min_fatty=min_fatty)
-        if ai_live:
-            spacing_pct = _clamp(float(ai_signal.get("recommendedSpacingPct", spacing_pct) or spacing_pct), max(min_scalpy / 2, 0.003), 0.03)
-            levels = int(_clamp(float(ai_signal.get("recommendedLevels", levels) or levels), 4, 24))
-        max_expo = float(state.get("gridMaxExposurePct", 0.10))
-        if ai_live:
-            max_expo = _clamp(float(ai_signal.get("recommendedMaxExposurePct", max_expo) or max_expo), 0.05, 0.60)
-            if ai_signal.get("reduceExposure"):
-                max_expo = min(max_expo, _clamp(float(ai_signal.get("riskBudgetPct", max_expo) or max_expo), 0.0, 0.60))
+        grid_plan = _compute_grid_plan(
+            state,
+            ai_signal,
+            ai_live,
+            grid_mode=grid_mode,
+            atr=atr,
+            price=price,
+        )
+        spacing_pct = grid_plan["spacing_pct"]
+        levels = grid_plan["levels"]
+        max_expo = grid_plan["max_expo"]
 
         if ai_pause_new_buys and (grid is None or not grid.active):
             _write_status({

@@ -44,6 +44,102 @@ def test_spacing_for_mode_accepts_fatty():
     ) == (pytest.approx(0.014), 8)
 
 
+@pytest.mark.parametrize(
+    ("mode", "expected_spacing", "expected_levels"),
+    [("scalpy", 0.008, 14), ("fatty", 0.014, 8)],
+)
+def test_compute_grid_plan_non_ai_uses_mode_spacing_and_state_exposure(
+    mode,
+    expected_spacing,
+    expected_levels,
+):
+    plan = engine._compute_grid_plan(
+        {
+            "gridMinSpacingPctScalpy": 0.006,
+            "gridMinSpacingPctFatty": 0.010,
+            "gridMaxExposurePct": 0.12,
+        },
+        {
+            "recommendedSpacingPct": 0.03,
+            "recommendedLevels": 4,
+            "recommendedMaxExposurePct": 0.60,
+        },
+        False,
+        grid_mode=mode,
+        atr=10.0,
+        price=1000.0,
+    )
+
+    assert plan["spacing_pct"] == pytest.approx(expected_spacing)
+    assert plan["levels"] == expected_levels
+    assert plan["max_expo"] == pytest.approx(0.12)
+    assert plan["min_scalpy"] == pytest.approx(0.006)
+    assert plan["min_fatty"] == pytest.approx(0.010)
+
+
+def test_compute_grid_plan_ai_live_clamps_recommended_values():
+    plan = engine._compute_grid_plan(
+        {
+            "gridMinSpacingPctScalpy": 0.006,
+            "gridMinSpacingPctFatty": 0.010,
+            "gridMaxExposurePct": 0.10,
+        },
+        {
+            "recommendedSpacingPct": 0.20,
+            "recommendedLevels": 99,
+            "recommendedMaxExposurePct": 0.90,
+        },
+        True,
+        grid_mode="scalpy",
+        atr=1.0,
+        price=1000.0,
+    )
+
+    assert plan["spacing_pct"] == pytest.approx(0.03)
+    assert plan["levels"] == 24
+    assert plan["max_expo"] == pytest.approx(0.60)
+
+
+def test_compute_grid_plan_ai_reduce_exposure_limits_max_exposure_to_risk_budget():
+    plan = engine._compute_grid_plan(
+        {"gridMaxExposurePct": 0.50},
+        {
+            "recommendedMaxExposurePct": 0.40,
+            "reduceExposure": True,
+            "riskBudgetPct": 0.15,
+        },
+        True,
+        grid_mode="scalpy",
+        atr=1.0,
+        price=1000.0,
+    )
+
+    assert plan["max_expo"] == pytest.approx(0.15)
+
+
+@pytest.mark.parametrize(
+    ("min_scalpy", "expected_spacing"),
+    [(0.012, 0.006), (0.004, 0.003)],
+)
+def test_compute_grid_plan_ai_spacing_lower_clamp_uses_half_scalpy_or_floor(
+    min_scalpy,
+    expected_spacing,
+):
+    plan = engine._compute_grid_plan(
+        {
+            "gridMinSpacingPctScalpy": min_scalpy,
+            "gridMinSpacingPctFatty": 0.010,
+        },
+        {"recommendedSpacingPct": 0.001},
+        True,
+        grid_mode="scalpy",
+        atr=0.0,
+        price=1000.0,
+    )
+
+    assert plan["spacing_pct"] == pytest.approx(expected_spacing)
+
+
 @pytest.mark.parametrize("mode", ["flexy", "chaos", "", None])
 def test_spacing_for_mode_rejects_unsupported_modes(mode):
     with pytest.raises(ValueError):
