@@ -2351,3 +2351,117 @@ def test_run_engine_tick_fee_floor_skip_writes_status_without_runtime_or_trades(
     assert calls["runtime_writes"] == []
     assert calls["maybe_runtime_calls"] == []
     assert calls["sleeps"] == [1]
+
+
+def test_run_engine_tick_grid_init_records_initial_buy_builds_grid_and_writes_status_runtime():
+    deps, calls = _fake_engine_tick_deps(
+        klines=_engine_test_klines(price=100.0),
+        ai_decision={"enabled": False, "source": "disabled"},
+        monotonic_values=[123.0],
+    )
+    trade_events = []
+
+    def append_trade(event: dict) -> None:
+        event_copy = dict(event)
+        calls["trade_appends"].append(event_copy)
+        trade_events.append(event_copy)
+
+    def load_trade_events() -> list[dict]:
+        calls["trade_event_loads"].append(True)
+        return list(trade_events)
+
+    deps.append_trade = append_trade
+    deps.load_trade_events = load_trade_events
+
+    paper = engine.PaperAccount(usdt=1000.0, btc=0.0)
+    stats = engine.Stats(day="2026-05-06", peak_equity=1000.0)
+    cum = _engine_test_cum()
+
+    result = engine._run_engine_tick(
+        state={
+            "mode": "paper",
+            "gridMode": "scalpy",
+            "maxDailyLossPct": 0.50,
+            "gridTrailActive": False,
+            "feeBps": 10,
+            "paperMarketSlipBps": 12,
+            "gridMaxExposurePct": 0.10,
+            "gridMinPerLevelUsdt": 20.0,
+            "gridMinSpacingPctScalpy": 0.006,
+            "gridMinSpacingPctFatty": 0.010,
+        },
+        paper=paper,
+        stats=stats,
+        grid=None,
+        cum=cum,
+        symbol="BTCUSDT",
+        interval="15m",
+        runtime_snapshot_gate=engine._SnapshotChangeGate(10, 60, 5),
+        engine_pid=123,
+        last_heartbeat_log_monotonic=None,
+        deps=deps,
+    )
+
+    assert result.last_event == "TICK"
+    assert result.grid is not None
+    assert result.grid.active is True
+    assert result.paper is paper
+    assert result.stats is stats
+
+    assert len(calls["trade_appends"]) == 2
+    enter_event = calls["trade_appends"][0]
+    assert enter_event["event"] == "ENTER"
+    assert enter_event["reason"] == "GRID_INIT"
+    assert enter_event["type"] == "PAPER_MARKET"
+    assert enter_event["side"] == "BUY"
+    assert enter_event["symbol"] == "BTCUSDT"
+    assert enter_event["qtyBtc"] == pytest.approx(0.49940071913703554)
+    assert enter_event["price"] == pytest.approx(100.12)
+    assert enter_event["notionalUsdt"] == pytest.approx(50.0)
+    assert enter_event["feeUsdt"] == pytest.approx(0.05)
+    assert enter_event["paper"] is True
+
+    grid_init_event = calls["trade_appends"][1]
+    assert grid_init_event["event"] == "GRID_INIT"
+    assert grid_init_event["mode"] == "scalpy"
+    assert grid_init_event["spacingPct"] == pytest.approx(0.016)
+    assert grid_init_event["levels"] == 14
+    assert grid_init_event["anchor"] == pytest.approx(100.0)
+    assert grid_init_event["paper"] is True
+
+    grid = result.grid
+    assert grid.anchor == pytest.approx(100.0)
+    assert grid.spacing_pct == pytest.approx(0.016)
+    assert grid.levels == 14
+    assert grid.max_exposure_pct == pytest.approx(0.10)
+    assert grid.reserved_usdt == pytest.approx(50.0)
+    assert grid.reserved_btc == pytest.approx(0.49940071913703554)
+    assert grid.cost_basis_usdt == pytest.approx(50.05)
+    assert len(grid.orders) == 28
+    assert grid.last_recenter_utc is not None
+
+    assert len(calls["cum_writes"]) == 1
+    cum_write = calls["cum_writes"][0]
+    assert cum_write["feesPaidUsdt"] == pytest.approx(0.05)
+    assert cum_write["trades"] == 0
+    assert cum_write["wins"] == 0
+    assert cum_write["losses"] == 0
+
+    assert len(calls["status_writes"]) == 1
+    status = calls["status_writes"][0]
+    assert status["lastEvent"] == "TICK"
+    assert status["stats"]["grid"]["openOrders"] == 28
+    assert status["stats"]["hasOpenPosition"] is True
+    assert status["stats"]["entries"] == 1
+    assert status["position"] is not None
+
+    assert len(calls["maybe_runtime_calls"]) == 1
+    runtime_payload = calls["maybe_runtime_calls"][0][1]
+    assert calls["runtime_writes"] == []
+    assert runtime_payload["enginePid"] == 123
+    assert len(runtime_payload["grid"]["orders"]) == 28
+
+    assert calls["state_writes"] == []
+    assert calls["sleeps"] == [1]
+    assert any(log.startswith("GRID_INIT ") for log in calls["logs"])
+    assert any(log.startswith("HEARTBEAT price=100.00") for log in calls["logs"])
