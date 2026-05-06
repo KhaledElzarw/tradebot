@@ -663,6 +663,75 @@ def test_position_payload_without_grid_uses_zero_unrealized_fields():
     }
 
 
+def test_skip_position_payload_returns_none_without_btc():
+    paper = engine.PaperAccount(usdt=100.0, btc=0.0)
+
+    assert engine._skip_position_payload(paper, None) is None
+
+
+def test_skip_position_payload_preserves_manual_zero_unrealized_shape():
+    paper = engine.PaperAccount(usdt=100.0, btc=0.25)
+    grid = engine.GridState(
+        anchor=100.0,
+        spacing_pct=0.01,
+        levels=2,
+        max_exposure_pct=0.5,
+        reserved_usdt=25.0,
+        reserved_btc=0.25,
+        cost_basis_usdt=50.0,
+        orders=[],
+        active=False,
+        last_recenter_utc="2026-05-06T00:00:00+00:00",
+    )
+
+    assert engine._skip_position_payload(paper, grid) == {
+        "entryPrice": 200.0,
+        "qtyBtc": 0.25,
+        "stop": 0.0,
+        "tp": None,
+        "entryTimeUtc": "2026-05-06T00:00:00+00:00",
+        "unrealizedPnlUsdt": 0.0,
+        "unrealizedPnlPct": 0.0,
+    }
+
+
+def test_skip_position_payload_preserves_grid_trail_stop_and_entry_time_fields():
+    paper = engine.PaperAccount(usdt=100.0, btc=0.5)
+    grid = engine.GridState(
+        anchor=100.0,
+        spacing_pct=0.01,
+        levels=2,
+        max_exposure_pct=0.5,
+        reserved_usdt=25.0,
+        reserved_btc=0.5,
+        cost_basis_usdt=50.0,
+        orders=[],
+        active=False,
+        last_recenter_utc="2026-05-06T00:00:00+00:00",
+    )
+    grid.__dict__["trail_stop"] = 95.0
+
+    payload = engine._skip_position_payload(paper, grid)
+
+    assert payload["entryPrice"] == 100.0
+    assert payload["stop"] == 95.0
+    assert payload["entryTimeUtc"] == "2026-05-06T00:00:00+00:00"
+
+
+def test_skip_position_payload_without_grid_uses_none_entry_fields_and_zero_unrealized():
+    paper = engine.PaperAccount(usdt=100.0, btc=0.5)
+
+    assert engine._skip_position_payload(paper, None) == {
+        "entryPrice": None,
+        "qtyBtc": 0.5,
+        "stop": None,
+        "tp": None,
+        "entryTimeUtc": None,
+        "unrealizedPnlUsdt": 0.0,
+        "unrealizedPnlPct": 0.0,
+    }
+
+
 def test_grid_telemetry_reports_effective_ai_mode_and_preserves_inputs():
     payload = engine._grid_telemetry(
         state={"gridMode": "scalpy"},

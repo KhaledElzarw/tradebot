@@ -978,6 +978,27 @@ def _position_payload(paper: PaperAccount, grid: GridState | None, price: float)
     }
 
 
+def _skip_position_payload(
+    paper: PaperAccount,
+    grid: GridState | None,
+    *,
+    zero_unrealized: bool = True,
+) -> dict | None:
+    if paper.btc <= 0:
+        return None
+    unreal = 0.0 if zero_unrealized else None
+    unreal_pct = 0.0 if zero_unrealized else None
+    return {
+        "entryPrice": (grid.cost_basis_usdt / paper.btc) if (grid and paper.btc > 0) else None,
+        "qtyBtc": paper.btc,
+        "stop": float((grid.__dict__.get("trail_stop", 0.0) or 0.0)) if grid else None,
+        "tp": None,
+        "entryTimeUtc": grid.last_recenter_utc if grid else None,
+        "unrealizedPnlUsdt": unreal,
+        "unrealizedPnlPct": unreal_pct,
+    }
+
+
 def _spacing_for_mode(mode: str | None, atr: float, price: float, *, min_scalpy: float, min_fatty: float) -> tuple[float, int]:
     # Return (spacing_pct, levels)
     # NOTE: With 10bps fees, a full cycle (buy+sell) costs ~20bps, so spacing must be well above 0.20%.
@@ -1619,15 +1640,7 @@ def main():
                 interval=interval,
                 price=price,
                 paper=paper,
-                position_payload=None if paper.btc <= 0 else {
-                    "entryPrice": (grid.cost_basis_usdt / paper.btc) if (grid and paper.btc > 0) else None,
-                    "qtyBtc": paper.btc,
-                    "stop": float((grid.__dict__.get("trail_stop", 0.0) or 0.0)) if grid else None,
-                    "tp": None,
-                    "entryTimeUtc": grid.last_recenter_utc if grid else None,
-                    "unrealizedPnlUsdt": 0.0,
-                    "unrealizedPnlPct": 0.0,
-                },
+                position_payload=_skip_position_payload(paper, grid),
                 stats_payload=_status_stats_payload(
                     stats=stats,
                     trend_strength=trend_strength,
