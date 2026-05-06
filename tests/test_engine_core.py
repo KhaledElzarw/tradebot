@@ -441,6 +441,66 @@ def test_update_equity_drawdown_does_not_reduce_existing_max_drawdown():
     assert stats.max_drawdown_pct == pytest.approx(0.20)
 
 
+def test_daily_stop_decision_no_peak_returns_zero_loss_without_stop():
+    stats = engine.Stats(day="2026-05-06", peak_equity=0.0, max_drawdown_pct=0.20)
+    before = stats.__dict__.copy()
+
+    daily_stop_hit, daily_loss_pct = engine._daily_stop_decision(
+        stats,
+        equity=900.0,
+        max_daily_loss_pct=0.10,
+    )
+
+    assert daily_stop_hit is False
+    assert daily_loss_pct == pytest.approx(0.0)
+    assert stats.__dict__ == before
+
+
+def test_daily_stop_decision_below_threshold_does_not_stop():
+    stats = engine.Stats(day="2026-05-06", peak_equity=1000.0, max_drawdown_pct=0.20)
+    before = stats.__dict__.copy()
+
+    daily_stop_hit, daily_loss_pct = engine._daily_stop_decision(
+        stats,
+        equity=950.0,
+        max_daily_loss_pct=0.10,
+    )
+
+    assert daily_stop_hit is False
+    assert daily_loss_pct == pytest.approx(0.05)
+    assert stats.__dict__ == before
+
+
+def test_daily_stop_decision_at_threshold_stops():
+    stats = engine.Stats(day="2026-05-06", peak_equity=1000.0, max_drawdown_pct=0.20)
+    before = stats.__dict__.copy()
+
+    daily_stop_hit, daily_loss_pct = engine._daily_stop_decision(
+        stats,
+        equity=900.0,
+        max_daily_loss_pct=0.10,
+    )
+
+    assert daily_stop_hit is True
+    assert daily_loss_pct == pytest.approx(0.10)
+    assert stats.__dict__ == before
+
+
+def test_daily_stop_decision_equity_above_peak_clamps_loss_to_zero():
+    stats = engine.Stats(day="2026-05-06", peak_equity=1000.0, max_drawdown_pct=0.20)
+    before = stats.__dict__.copy()
+
+    daily_stop_hit, daily_loss_pct = engine._daily_stop_decision(
+        stats,
+        equity=1100.0,
+        max_daily_loss_pct=0.10,
+    )
+
+    assert daily_stop_hit is False
+    assert daily_loss_pct == pytest.approx(0.0)
+    assert stats.__dict__ == before
+
+
 def test_ema_and_atr_cover_success_and_insufficient_data():
     assert engine._ema([10.0, 12.0, 14.0], period=3) == pytest.approx(12.5)
 

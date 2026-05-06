@@ -775,6 +775,19 @@ def _update_equity_drawdown(stats: Stats, equity: float) -> Stats:
     return stats
 
 
+def _daily_stop_decision(
+    stats: Stats,
+    equity: float,
+    max_daily_loss_pct: float,
+) -> tuple[bool, float]:
+    daily_loss_pct = (
+        max(0.0, (stats.peak_equity - equity) / stats.peak_equity)
+        if stats.peak_equity > 0
+        else 0.0
+    )
+    return daily_loss_pct >= max_daily_loss_pct, daily_loss_pct
+
+
 def _grid_mode_error(mode: object) -> ValueError:
     allowed = ", ".join(sorted(SUPPORTED_GRID_MODES))
     return ValueError(f"unsupported gridMode {mode!r}; gridMode must be one of: {allowed}")
@@ -1260,8 +1273,12 @@ def main():
         stats = _update_equity_drawdown(stats, eq)
 
         # daily stop
-        daily_loss_pct = max(0.0, (stats.peak_equity - eq) / stats.peak_equity) if stats.peak_equity > 0 else 0.0
-        if daily_loss_pct >= float(state.get("maxDailyLossPct", 0.10)):
+        daily_stop_hit, daily_loss_pct = _daily_stop_decision(
+            stats,
+            eq,
+            float(state.get("maxDailyLossPct", 0.10)),
+        )
+        if daily_stop_hit:
             _log(f"DAILY_STOP hit daily_loss_pct={daily_loss_pct:.4f} >= {state.get('maxDailyLossPct')} -> pausing")
             state["paused"] = True
             _write_json(STATE_PATH, state)
