@@ -173,6 +173,48 @@ def test_compute_grid_plan_ai_spacing_lower_clamp_uses_half_scalpy_or_floor(
     assert plan["spacing_pct"] == pytest.approx(expected_spacing)
 
 
+def test_spacing_fee_floor_decision_uses_default_scalpy_floor():
+    should_skip, required_floor = engine._spacing_fee_floor_decision({}, 0.005)
+
+    assert should_skip is True
+    assert required_floor == pytest.approx(0.006)
+
+
+def test_spacing_fee_floor_decision_uses_fee_plus_profit_floor_when_higher():
+    should_skip, required_floor = engine._spacing_fee_floor_decision(
+        {
+            "feeBps": 20,
+            "gridTrailMinNetProfitPct": 0.002,
+            "gridMinSpacingPctScalpy": 0.001,
+        },
+        0.005,
+    )
+
+    assert should_skip is True
+    assert required_floor == pytest.approx(0.006)
+
+
+def test_spacing_fee_floor_decision_allows_spacing_equal_to_floor():
+    should_skip, required_floor = engine._spacing_fee_floor_decision({}, 0.006)
+
+    assert should_skip is False
+    assert required_floor == pytest.approx(0.006)
+
+
+def test_spacing_fee_floor_decision_coerces_string_values_like_main():
+    should_skip, required_floor = engine._spacing_fee_floor_decision(
+        {
+            "feeBps": "20",
+            "gridTrailMinNetProfitPct": "0.002",
+            "gridMinSpacingPctScalpy": "0.001",
+        },
+        0.005,
+    )
+
+    assert should_skip is True
+    assert required_floor == pytest.approx(0.006)
+
+
 @pytest.mark.parametrize("mode", ["flexy", "chaos", "", None])
 def test_spacing_for_mode_rejects_unsupported_modes(mode):
     with pytest.raises(ValueError):
