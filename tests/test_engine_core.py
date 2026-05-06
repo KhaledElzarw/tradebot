@@ -696,6 +696,164 @@ def test_status_payload_supports_none_position_and_preserves_last_event(monkeypa
     assert payload["lastEvent"] == "GRID_SKIP"
 
 
+def test_runtime_payload_normal_tick_uses_stats_values_without_cum():
+    stats = engine.Stats(day="2026-05-06", trades=3, wins=2, losses=1, pnl_usdt=7.25)
+
+    payload = engine._runtime_payload(
+        engine_pid=123,
+        paper=engine.PaperAccount(usdt=1000.0, btc=0.25),
+        stats=stats,
+        entries_count=4,
+        exits_count=3,
+        has_open_position=True,
+        market_payload={"price": 41000.0},
+        grid=None,
+        ai_signal={},
+        saved_at="2026-05-06T12:32:00+00:00",
+    )
+
+    assert payload["stats"]["trades"] == 3
+    assert payload["stats"]["closedTrades"] == 3
+    assert payload["stats"]["wins"] == 2
+    assert payload["stats"]["losses"] == 1
+    assert payload["stats"]["pnl_usdt"] == 7.25
+
+
+def test_runtime_payload_uses_cumulative_values_when_supplied():
+    stats = engine.Stats(day="2026-05-06", trades=1, wins=0, losses=1, pnl_usdt=-1.0)
+    cum = {
+        "trades": 6,
+        "wins": 5,
+        "losses": 1,
+        "realizedPnlUsdt": 18.75,
+    }
+
+    payload = engine._runtime_payload(
+        engine_pid=123,
+        paper=engine.PaperAccount(usdt=1000.0, btc=0.25),
+        stats=stats,
+        entries_count=7,
+        exits_count=6,
+        has_open_position=True,
+        market_payload={"price": 41000.0},
+        grid=None,
+        ai_signal={},
+        cum=cum,
+        saved_at="2026-05-06T12:33:00+00:00",
+    )
+
+    assert payload["stats"]["trades"] == 6
+    assert payload["stats"]["closedTrades"] == 6
+    assert payload["stats"]["wins"] == 5
+    assert payload["stats"]["losses"] == 1
+    assert payload["stats"]["pnl_usdt"] == 18.75
+
+
+def test_runtime_payload_includes_entry_exit_and_open_position_counts():
+    payload = engine._runtime_payload(
+        engine_pid=123,
+        paper=engine.PaperAccount(usdt=1000.0, btc=0.0),
+        stats=engine.Stats(day="2026-05-06"),
+        entries_count=8,
+        exits_count=5,
+        has_open_position=False,
+        market_payload={"price": 41000.0},
+        grid=None,
+        ai_signal={},
+        saved_at="2026-05-06T12:34:00+00:00",
+    )
+
+    assert payload["stats"]["entries"] == 8
+    assert payload["stats"]["exits"] == 5
+    assert payload["stats"]["hasOpenPosition"] is False
+
+
+def test_runtime_payload_preserves_drawdown_peak_and_cooldown():
+    cooldown_until = datetime(2026, 5, 6, 13, 0, tzinfo=timezone.utc)
+    stats = engine.Stats(
+        day="2026-05-06",
+        max_drawdown_pct=0.04,
+        peak_equity=12_500.0,
+        cooldown_until=cooldown_until,
+    )
+
+    payload = engine._runtime_payload(
+        engine_pid=123,
+        paper=engine.PaperAccount(usdt=1000.0, btc=0.0),
+        stats=stats,
+        entries_count=0,
+        exits_count=0,
+        has_open_position=False,
+        market_payload={"price": 41000.0},
+        grid=None,
+        ai_signal={},
+        saved_at="2026-05-06T12:35:00+00:00",
+    )
+
+    assert payload["stats"]["max_drawdown_pct"] == 0.04
+    assert payload["stats"]["peak_equity"] == 12_500.0
+    assert payload["stats"]["cooldown_until"] == "2026-05-06T13:00:00+00:00"
+
+
+def test_runtime_payload_serializes_grid_with_orders_and_trailing_fields():
+    grid = engine.GridState(
+        anchor=100.0,
+        spacing_pct=0.01,
+        levels=2,
+        max_exposure_pct=0.35,
+        reserved_usdt=50.0,
+        reserved_btc=0.1,
+        cost_basis_usdt=25.0,
+        orders=[engine.GridOrder(side="BUY", price=99.0, qty_btc=0.01)],
+        active=True,
+        last_recenter_utc="2026-05-06T12:00:00+00:00",
+    )
+    grid.__dict__["trail_armed"] = True
+    grid.__dict__["trail_stop"] = 95.5
+
+    payload = engine._runtime_payload(
+        engine_pid=123,
+        paper=engine.PaperAccount(usdt=1000.0, btc=0.1),
+        stats=engine.Stats(day="2026-05-06"),
+        entries_count=1,
+        exits_count=0,
+        has_open_position=True,
+        market_payload={"price": 101.0},
+        grid=grid,
+        ai_signal={},
+        saved_at="2026-05-06T12:36:00+00:00",
+    )
+
+    assert payload["grid"] == engine._serialize_grid(grid)
+    assert payload["grid"]["orders"] == [{"side": "BUY", "price": 99.0, "qty_btc": 0.01}]
+    assert payload["grid"]["trail_armed"] is True
+    assert payload["grid"]["trail_stop"] == 95.5
+
+
+def test_runtime_payload_preserves_market_ai_and_injected_saved_at():
+    market_payload = {"price": 41000.0, "candle": {"openTimeMs": 1}}
+    ai_signal = {"enabled": True, "riskAction": "allow_grid"}
+
+    payload = engine._runtime_payload(
+        engine_pid=456,
+        paper=engine.PaperAccount(usdt=1000.0, btc=0.25),
+        stats=engine.Stats(day="2026-05-06"),
+        entries_count=1,
+        exits_count=0,
+        has_open_position=True,
+        market_payload=market_payload,
+        grid=None,
+        ai_signal=ai_signal,
+        saved_at="2026-05-06T12:37:00+00:00",
+    )
+
+    assert payload["enginePid"] == 456
+    assert payload["paper"] == {"usdt": 1000.0, "btc": 0.25}
+    assert payload["market"] is market_payload
+    assert payload["ai"] is ai_signal
+    assert payload["savedAt"] == "2026-05-06T12:37:00+00:00"
+
+
 def test_attach_ai_event_fields_preserves_empty_and_adds_known_fields():
     event = {"event": "ENTER"}
 

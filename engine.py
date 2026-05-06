@@ -865,6 +865,58 @@ def _status_payload(
     }
 
 
+def _runtime_payload(
+    *,
+    engine_pid: int,
+    paper: PaperAccount,
+    stats: Stats,
+    entries_count: int,
+    exits_count: int,
+    has_open_position: bool,
+    market_payload: dict,
+    grid: GridState | None,
+    ai_signal: dict,
+    cum: dict | None = None,
+    saved_at: str | None = None,
+) -> dict:
+    if cum is not None:
+        trades = int(cum.get("trades", stats.trades or 0))
+        wins = int(cum.get("wins", stats.wins))
+        losses = int(cum.get("losses", stats.losses))
+        pnl_usdt = float(cum.get("realizedPnlUsdt", stats.pnl_usdt))
+    else:
+        trades = stats.trades
+        wins = stats.wins
+        losses = stats.losses
+        pnl_usdt = stats.pnl_usdt
+
+    return {
+        "enginePid": engine_pid,
+        "paper": {
+            "usdt": paper.usdt,
+            "btc": paper.btc,
+        },
+        "stats": {
+            "day": stats.day,
+            "trades": trades,
+            "closedTrades": trades,
+            "entries": entries_count,
+            "exits": exits_count,
+            "hasOpenPosition": has_open_position,
+            "wins": wins,
+            "losses": losses,
+            "pnl_usdt": pnl_usdt,
+            "max_drawdown_pct": stats.max_drawdown_pct,
+            "peak_equity": stats.peak_equity,
+            "cooldown_until": stats.cooldown_until.isoformat() if stats.cooldown_until else None,
+        },
+        "market": market_payload,
+        "grid": _serialize_grid(grid),
+        "ai": ai_signal,
+        "savedAt": saved_at if saved_at is not None else _utc_now().isoformat(),
+    }
+
+
 def _position_payload(paper: PaperAccount, grid: GridState | None, price: float) -> dict | None:
     if paper.btc <= 0:
         return None
@@ -1292,37 +1344,24 @@ def main():
                 last_event="PAUSED" if inactive_reason == "paused" else "COOLDOWN",
             )
             _write_status(status_payload)
-            runtime_payload = {
-                "enginePid": os.getpid(),
-                "paper": {
-                    "usdt": paper.usdt,
-                    "btc": paper.btc,
-                },
-                "stats": {
-                    "day": stats.day,
-                    "trades": int(cum.get("trades", stats.trades)),
-                    "closedTrades": int(cum.get("trades", stats.trades)),
-                    "entries": entries_count,
-                    "exits": exits_count,
-                    "hasOpenPosition": has_open_position,
-                    "wins": int(cum.get("wins", stats.wins)),
-                    "losses": int(cum.get("losses", stats.losses)),
-                    "pnl_usdt": float(cum.get("realizedPnlUsdt", stats.pnl_usdt)),
-                    "max_drawdown_pct": stats.max_drawdown_pct,
-                    "peak_equity": stats.peak_equity,
-                    "cooldown_until": stats.cooldown_until.isoformat() if stats.cooldown_until else None,
-                },
-                "market": _build_runtime_market_payload(
+            runtime_payload = _runtime_payload(
+                engine_pid=os.getpid(),
+                paper=paper,
+                stats=stats,
+                entries_count=entries_count,
+                exits_count=exits_count,
+                has_open_position=has_open_position,
+                market_payload=_build_runtime_market_payload(
                     kl,
                     close,
                     price=price,
                     candle_hi=candle_hi,
                     candle_lo=candle_lo,
                 ),
-                "grid": _serialize_grid(grid),
-                "ai": ai_signal,
-                "savedAt": _utc_now().isoformat(),
-            }
+                grid=grid,
+                ai_signal=ai_signal,
+                cum=cum,
+            )
             _maybe_write_runtime_state(runtime_snapshot_gate, runtime_payload)
             time.sleep(1)
             continue
@@ -1448,37 +1487,24 @@ def main():
                     ),
                     last_event="EXIT",
                 ))
-                _write_runtime_state({
-                    "enginePid": os.getpid(),
-                    "paper": {
-                        "usdt": paper.usdt,
-                        "btc": paper.btc,
-                    },
-                    "stats": {
-                        "day": stats.day,
-                        "trades": int(cum.get("trades", 0)),
-                        "closedTrades": int(cum.get("trades", 0)),
-                        "entries": entries_count,
-                        "exits": exits_count,
-                        "hasOpenPosition": False,
-                        "wins": int(cum.get("wins", 0)),
-                        "losses": int(cum.get("losses", 0)),
-                        "pnl_usdt": float(cum.get("realizedPnlUsdt", 0.0)),
-                        "max_drawdown_pct": stats.max_drawdown_pct,
-                        "peak_equity": stats.peak_equity,
-                        "cooldown_until": stats.cooldown_until.isoformat() if stats.cooldown_until else None,
-                    },
-                    "market": _build_runtime_market_payload(
+                _write_runtime_state(_runtime_payload(
+                    engine_pid=os.getpid(),
+                    paper=paper,
+                    stats=stats,
+                    entries_count=entries_count,
+                    exits_count=exits_count,
+                    has_open_position=False,
+                    market_payload=_build_runtime_market_payload(
                         kl,
                         close,
                         price=price,
                         candle_hi=candle_hi,
                         candle_lo=candle_lo,
                     ),
-                    "grid": _serialize_grid(grid),
-                    "ai": ai_signal,
-                    "savedAt": _utc_now().isoformat(),
-                })
+                    grid=grid,
+                    ai_signal=ai_signal,
+                    cum=cum,
+                ))
 
                 time.sleep(1)
                 continue
@@ -1796,37 +1822,23 @@ def main():
         )
         _write_status(status_payload)
 
-        runtime_payload = {
-            "enginePid": os.getpid(),
-            "paper": {
-                "usdt": paper.usdt,
-                "btc": paper.btc,
-            },
-            "stats": {
-                "day": stats.day,
-                "trades": stats.trades,
-                "closedTrades": stats.trades,
-                "entries": entries_count,
-                "exits": exits_count,
-                "hasOpenPosition": has_open_position,
-                "wins": stats.wins,
-                "losses": stats.losses,
-                "pnl_usdt": stats.pnl_usdt,
-                "max_drawdown_pct": stats.max_drawdown_pct,
-                "peak_equity": stats.peak_equity,
-                "cooldown_until": stats.cooldown_until.isoformat() if stats.cooldown_until else None,
-            },
-            "market": _build_runtime_market_payload(
+        runtime_payload = _runtime_payload(
+            engine_pid=os.getpid(),
+            paper=paper,
+            stats=stats,
+            entries_count=entries_count,
+            exits_count=exits_count,
+            has_open_position=has_open_position,
+            market_payload=_build_runtime_market_payload(
                 kl,
                 close,
                 price=price,
                 candle_hi=candle_hi,
                 candle_lo=candle_lo,
             ),
-            "grid": _serialize_grid(grid),
-            "ai": ai_signal,
-            "savedAt": _utc_now().isoformat(),
-        }
+            grid=grid,
+            ai_signal=ai_signal,
+        )
         _maybe_write_runtime_state(runtime_snapshot_gate, runtime_payload)
 
         now_monotonic = time.monotonic()
