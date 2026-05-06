@@ -143,6 +143,8 @@ function signedClass(v) { return Number(v) > 0 ? 'positive' : Number(v) < 0 ? 'n
 function humanAge(seconds) { if (seconds == null) return '--'; if (seconds < 60) return `${seconds.toFixed(2)}s`; if (seconds < 3600) return `${(seconds/60).toFixed(1)}m`; return `${(seconds/3600).toFixed(1)}h`; }
 function buildKvHtml(label, value, extraClass='', changed=false) { return `<div class="kv ${changed ? 'changed' : ''}"><div class="k">${label}</div><div class="v ${extraClass}">${value}</div></div>`; }
 function renderKVs(targetId, rows) { document.getElementById(targetId).innerHTML = rows.map(([k, v, extraClass, changed]) => buildKvHtml(k, v, extraClass, changed)).join(''); }
+function setTextIfPresent(targetId, value) { const el = document.getElementById(targetId); if (el) el.textContent = value; return el; }
+function setHtmlIfPresent(targetId, value) { const el = document.getElementById(targetId); if (el) el.innerHTML = value; return el; }
 function normalizeTimeframe(tf) { return TIMEFRAMES.includes(tf) ? tf : '1m'; }
 function optionValue(opt) { return typeof opt === 'object' ? opt.value : opt; }
 function optionLabel(opt) { return typeof opt === 'object' ? opt.label : opt; }
@@ -252,21 +254,23 @@ function renderStickySummary(status, cumulative, runtime, grid) {
   ];
   const summaryEl = document.getElementById('sticky-summary');
   const itemKeys = new Set(items.map(([key]) => key));
-  const needsSummarySeed = !summaryEl.children.length || items.some(([key]) => !document.getElementById(`summary-${key}`));
-  if (needsSummarySeed) {
-    summaryEl.innerHTML = items.map(([key, label, value, changed, extraClass]) => `<div class="metric ${changed ? 'changed' : ''}" data-summary-key="${key}"><div class="label">${label}</div><div class="value ${extraClass || ''}" id="summary-${key}">${value}</div></div>`).join('');
-  } else {
-    items.forEach(([key, label, value, changed, extraClass]) => {
-      const metric = summaryEl.querySelector(`[data-summary-key="${key}"]`);
-      const valueEl = document.getElementById(`summary-${key}`);
-      if (metric) metric.classList.toggle('changed', changed);
-      if (metric) {
-        const labelEl = metric.querySelector('.label');
-        if (labelEl && labelEl.textContent !== label) labelEl.textContent = label;
-      }
-      if (valueEl && valueEl.textContent !== value) valueEl.textContent = value;
-      if (valueEl) valueEl.className = `value ${extraClass || ''}`;
-    });
+  if (summaryEl) {
+    const needsSummarySeed = !summaryEl.children.length || items.some(([key]) => !document.getElementById(`summary-${key}`));
+    if (needsSummarySeed) {
+      summaryEl.innerHTML = items.map(([key, label, value, changed, extraClass]) => `<div class="metric ${changed ? 'changed' : ''}" data-summary-key="${key}"><div class="label">${label}</div><div class="value ${extraClass || ''}" id="summary-${key}">${value}</div></div>`).join('');
+    } else {
+      items.forEach(([key, label, value, changed, extraClass]) => {
+        const metric = summaryEl.querySelector(`[data-summary-key="${key}"]`);
+        const valueEl = document.getElementById(`summary-${key}`);
+        if (metric) metric.classList.toggle('changed', changed);
+        if (metric) {
+          const labelEl = metric.querySelector('.label');
+          if (labelEl && labelEl.textContent !== label) labelEl.textContent = label;
+        }
+        if (valueEl && valueEl.textContent !== value) valueEl.textContent = value;
+        if (valueEl) valueEl.className = `value ${extraClass || ''}`;
+      });
+    }
   }
   stateUi.lastSummaryMetricKeys = itemKeys;
   const auditFormula = `Net ${fmtMoney(realized)} = Gross ${fmtMoney(grossRealized)} - Fees ${fmtMoney(feesPaid)}`;
@@ -282,16 +286,16 @@ function renderStickySummary(status, cumulative, runtime, grid) {
       auditStatus.className = 'pill negative';
     }
   }
-  document.getElementById('trading-state-label').textContent = stateLabel;
-  document.getElementById('state-mode').textContent = `${String((stateUi.lastState && stateUi.lastState.gridMode) || 'grid')} + ${aiEnabled ? 'Local AI' : 'Rules'}`;
-  document.getElementById('state-risk').textContent = exposure > 0.85 ? 'High' : (exposure > 0.55 ? 'Normal' : 'Light');
-  document.getElementById('state-risk').className = exposure > 0.85 ? 'negative' : 'positive';
-  document.getElementById('state-exposure').textContent = fmtPct(exposure);
-  document.getElementById('state-action').textContent = nextAction.split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+  setTextIfPresent('trading-state-label', stateLabel);
+  setTextIfPresent('state-mode', `${String((stateUi.lastState && stateUi.lastState.gridMode) || 'grid')} + ${aiEnabled ? 'Local AI' : 'Rules'}`);
+  const riskEl = setTextIfPresent('state-risk', exposure > 0.85 ? 'High' : (exposure > 0.55 ? 'Normal' : 'Light'));
+  if (riskEl) riskEl.className = exposure > 0.85 ? 'negative' : 'positive';
+  setTextIfPresent('state-exposure', fmtPct(exposure));
+  setTextIfPresent('state-action', nextAction.split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' '));
   updateChartTitle();
-  document.getElementById('chart-price-pill').innerHTML = `<span class="label">BTC Price</span><span class="${signedClass(0)}">${fmtPrice(status.price)}</span>`;
+  setHtmlIfPresent('chart-price-pill', `<span class="label">BTC Price</span><span class="${signedClass(0)}">${fmtPrice(status.price)}</span>`);
   const lastVisible = stateUi.visibleOhlcv.length ? stateUi.visibleOhlcv[stateUi.visibleOhlcv.length - 1] : {};
-  document.getElementById('chart-quote-line').textContent = `O ${fmtPrice(lastVisible.open)}  C ${fmtPrice(status.price)}`;
+  setTextIfPresent('chart-quote-line', `O ${fmtPrice(lastVisible.open)}  C ${fmtPrice(status.price)}`);
 }
 
 async function toggleBotPause() {
@@ -755,6 +759,7 @@ function drawCandles(ohlcv) {
   const allRows = (ohlcv || []).map(row => ({ ...row }));
   const visibleRows = getVisibleOhlcv(allRows);
   const canvas = document.getElementById('market-chart');
+  if (!canvas) return;
   const ctx = canvas.getContext('2d');
   const rect = canvas.getBoundingClientRect();
   canvas.width = rect.width * devicePixelRatio;
@@ -835,21 +840,21 @@ function drawCandles(ohlcv) {
   const latest = visibleRows[visibleRows.length - 1];
   const delta = latest.open ? latest.close - latest.open : 0;
   const deltaPct = latest.open ? delta / latest.open : 0;
-  document.getElementById('latest-candle').innerHTML = `<strong>Live candle</strong><span>O ${fmtPrice(latest.open)}  H ${fmtPrice(latest.high)}  L ${fmtPrice(latest.low)}  C ${fmtPrice(latest.close)}  Vol ${fmtMoney(latest.volumeUsdt)}</span>`;
-  document.getElementById('market-legend').innerHTML = `<span><b>${latest.symbol || 'BTC/USDT'}</b></span><span>O ${fmtPrice(latest.open)}</span><span>H ${fmtPrice(latest.high)}</span><span>L ${fmtPrice(latest.low)}</span><span>C ${fmtPrice(latest.close)}</span><span class="${signedClass(delta)}">${delta >= 0 ? '+' : ''}${fmtMoney(delta)} (${deltaPct >= 0 ? '+' : ''}${fmtPct(deltaPct)})</span>`;
-  document.getElementById('chart-quote-line').textContent = `O ${fmtPrice(latest.open)}  H ${fmtPrice(latest.high)}  L ${fmtPrice(latest.low)}  C ${fmtPrice(latest.close)}`;
+  setHtmlIfPresent('latest-candle', `<strong>Live candle</strong><span>O ${fmtPrice(latest.open)}  H ${fmtPrice(latest.high)}  L ${fmtPrice(latest.low)}  C ${fmtPrice(latest.close)}  Vol ${fmtMoney(latest.volumeUsdt)}</span>`);
+  setHtmlIfPresent('market-legend', `<span><b>${latest.symbol || 'BTC/USDT'}</b></span><span>O ${fmtPrice(latest.open)}</span><span>H ${fmtPrice(latest.high)}</span><span>L ${fmtPrice(latest.low)}</span><span>C ${fmtPrice(latest.close)}</span><span class="${signedClass(delta)}">${delta >= 0 ? '+' : ''}${fmtMoney(delta)} (${deltaPct >= 0 ? '+' : ''}${fmtPct(deltaPct)})</span>`);
+  setTextIfPresent('chart-quote-line', `O ${fmtPrice(latest.open)}  H ${fmtPrice(latest.high)}  L ${fmtPrice(latest.low)}  C ${fmtPrice(latest.close)}`);
   canvas.onmousemove = ev => {
     const r = canvas.getBoundingClientRect();
     const x = ev.clientX - r.left;
     const idx = Math.max(0, Math.min(visibleRows.length - 1, Math.floor((x - padL) / Math.max(1, candleGap))));
     canvas.__hoverIndex = idx;
     const c = visibleRows[idx];
-    document.getElementById('hover-ohlcv').innerHTML = `<strong>Cursor</strong><span>${new Date(c.openTimeMs).toLocaleString()}  O ${fmtPrice(c.open)}  H ${fmtPrice(c.high)}  L ${fmtPrice(c.low)}  C ${fmtPrice(c.close)}  Vol ${fmtMoney(c.volumeUsdt)}</span>`;
+    setHtmlIfPresent('hover-ohlcv', `<strong>Cursor</strong><span>${new Date(c.openTimeMs).toLocaleString()}  O ${fmtPrice(c.open)}  H ${fmtPrice(c.high)}  L ${fmtPrice(c.low)}  C ${fmtPrice(c.close)}  Vol ${fmtMoney(c.volumeUsdt)}</span>`);
     drawCandles(allRows);
   };
   canvas.onmouseleave = () => {
     canvas.__hoverIndex = null;
-    document.getElementById('hover-ohlcv').innerHTML = '<strong>Cursor</strong><span>Move over a candle</span>';
+    setHtmlIfPresent('hover-ohlcv', '<strong>Cursor</strong><span>Move over a candle</span>');
   };
 }
 

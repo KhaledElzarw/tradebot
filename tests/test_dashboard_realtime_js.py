@@ -125,7 +125,7 @@ def test_dashboard_boot_tolerates_cards_without_heads(tmp_path):
       document: {
         hidden: false,
         body: { classList: { toggle(){}, add(){}, remove(){} } },
-        getElementById(id){ return elements.get(id) || makeElement(id); },
+        getElementById(id){ return elements.get(id) || null; },
         createElement(tag){ return makeElement(tag); },
         querySelector(){ return null; },
         querySelectorAll(sel){ return sel === '.card' ? cards : []; },
@@ -157,6 +157,151 @@ def test_dashboard_boot_tolerates_cards_without_heads(tmp_path):
     vm.createContext(sandbox);
     vm.runInContext(script, sandbox);
     assert.ok(true);
+    """
+    result = subprocess.run(
+        [node, "-e", textwrap.dedent(harness)],
+        cwd=".",
+        env={"DASHBOARD_SCRIPT": _dashboard_script()},
+        text=True,
+        capture_output=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_summary_and_chart_renderers_tolerate_missing_optional_targets(tmp_path):
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for dashboard JS unit test")
+
+    harness = r"""
+    const assert = require('assert');
+    const vm = require('vm');
+    const script = process.env.DASHBOARD_SCRIPT;
+
+    function makeElement(id) {
+      const ctx = {
+        scale(){}, clearRect(){}, beginPath(){}, arc(){}, stroke(){}, fillText(){},
+        fillRect(){}, moveTo(){}, lineTo(){}, strokeRect(){}, closePath(){}, fill(){},
+      };
+      return {
+        id,
+        tagName: id === 'top-timeframe' ? 'A' : 'DIV',
+        href: '',
+        textContent: '',
+        innerHTML: '',
+        children: [],
+        disabled: false,
+        value: '',
+        style: {},
+        dataset: {},
+        className: '',
+        classList: { toggle(){}, add(){}, remove(){} },
+        addEventListener(){},
+        appendChild(child){ this.children.push(child); },
+        querySelector(){ return null; },
+        querySelectorAll(){ return []; },
+        getBoundingClientRect(){ return { width: 1200, height: 520, left: 0, top: 0 }; },
+        getContext(){ return ctx; },
+        parentElement: { querySelector(){ return { remove(){} }; } },
+      };
+    }
+
+    const elements = new Map();
+    const addElement = id => elements.set(id, makeElement(id));
+    [
+      'theme-toggle','bot-toggle-btn','ai-toggle-btn','reset-layout-btn',
+      'events-first-btn','events-prev-btn','events-next-btn','events-last-btn',
+      'orders-tab-open-btn','orders-tab-history-btn','orders-filter-buy-btn',
+      'orders-filter-sell-btn','orders-first-btn','orders-prev-btn',
+      'orders-next-btn','orders-last-btn','config-save-btn','market-chart',
+      'boot-error'
+    ].forEach(addElement);
+
+    const sandbox = {
+      console,
+      URL,
+      URLSearchParams,
+      Number,
+      Math,
+      Date,
+      JSON,
+      Object,
+      Array,
+      Set,
+      Map,
+      String,
+      Error,
+      AbortController,
+      devicePixelRatio: 1,
+      localStorage: { getItem(){ return null; }, setItem(){}, removeItem(){} },
+      history: { replaceState(){} },
+      document: {
+        hidden: false,
+        body: { classList: { toggle(){}, add(){}, remove(){} } },
+        getElementById(id){ return elements.get(id) || null; },
+        createElement(tag){ return makeElement(tag); },
+        querySelector(){ return null; },
+        querySelectorAll(){ return []; },
+        addEventListener(){},
+      },
+      window: {
+        location: {
+          href: 'http://localhost/?interval=1m',
+          origin: 'http://localhost',
+          protocol: 'http:',
+          host: 'localhost',
+          pathname: '/',
+          search: '?interval=1m',
+        },
+        addEventListener(){},
+      },
+      requestAnimationFrame(fn){ fn(); return 1; },
+      cancelAnimationFrame(){},
+      setInterval(){ return 1; },
+      clearInterval(){},
+      setTimeout(){ return 1; },
+      clearTimeout(){},
+      getComputedStyle(){ return { getPropertyValue(){ return '#111'; } }; },
+      fetch(){ throw new Error('fetch not expected in unit test'); },
+      WebSocket: function(){ throw new Error('websocket not expected in unit test'); },
+      EventSource: function(){ throw new Error('eventsource not expected in unit test'); },
+    };
+    sandbox.globalThis = sandbox;
+    vm.createContext(sandbox);
+    vm.runInContext(script + `
+      globalThis.__rendererTest = {
+        stateUi,
+        renderStickySummary,
+        drawCandles,
+      };
+    `, sandbox);
+
+    const t = sandbox.__rendererTest;
+    t.stateUi.lastState = { aiEnabled: true, gridMode: 'scalpy' };
+    assert.doesNotThrow(() => t.renderStickySummary(
+      {
+        price: 100,
+        equityUsdt: 500,
+        btc: 0.1,
+        position: { unrealizedPnlUsdt: 1.25 },
+        stats: { ai: { riskAction: 'allow_grid' } },
+      },
+      { realizedPnlUsdt: 2, feesPaidUsdt: 0.5 },
+      {},
+      { openOrders: 1 },
+    ));
+    assert.doesNotThrow(() => t.drawCandles([{
+      openTimeMs: 1000,
+      closeTimeMs: 1999,
+      open: 99,
+      high: 101,
+      low: 98,
+      close: 100,
+      volumeUsdt: 25,
+      symbol: 'BTCUSDT',
+      interval: '1m',
+    }]));
     """
     result = subprocess.run(
         [node, "-e", textwrap.dedent(harness)],
@@ -207,10 +352,18 @@ def test_realtime_chart_bar_merge_semantics(tmp_path):
     }
 
     const elements = new Map();
-    const getElement = id => {
-      if (!elements.has(id)) elements.set(id, makeElement(id));
-      return elements.get(id);
+    const addElement = id => {
+      const el = makeElement(id);
+      elements.set(id, el);
+      return el;
     };
+    const getElement = id => elements.get(id);
+    [
+      'theme-toggle','bot-toggle-btn','ai-toggle-btn','reset-layout-btn','events-first-btn','events-prev-btn','events-next-btn','events-last-btn',
+      'orders-tab-open-btn','orders-tab-history-btn','orders-filter-buy-btn','orders-filter-sell-btn','orders-first-btn','orders-prev-btn','orders-next-btn','orders-last-btn',
+      'config-save-btn','sticky-summary','trading-state-label','state-mode','state-risk','state-exposure','state-action','chart-price-pill','chart-quote-line',
+      'fresh-label','server-time','events-body','events-page-indicator','orders-body','orders-page-indicator','status-list','chart-stream-status'
+    ].forEach(addElement);
 
     const sandbox = {
       console,
@@ -232,7 +385,7 @@ def test_realtime_chart_bar_merge_semantics(tmp_path):
       document: {
         hidden: true,
         body: { classList: { toggle(){}, add(){}, remove(){} } },
-        getElementById: getElement,
+        getElementById(id){ return elements.get(id) || null; },
         createElement(tag){ return makeElement(tag); },
         querySelector(){ return null; },
         querySelectorAll(){ return []; },
