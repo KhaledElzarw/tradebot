@@ -1254,6 +1254,291 @@ def test_grid_serialization_round_trips_trailing_fields():
     assert restored.__dict__["trail_stop"] == 95.5
 
 
+def test_bootstrap_runtime_state_restores_reconciled_paper_and_stats():
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    reconciled = {
+        "paper": {"usdt": 900.0, "btc": 0.25},
+        "cumulative": {
+            "realizedPnlUsdt": 12.5,
+            "grossRealizedPnlUsdt": 15.0,
+            "feesPaidUsdt": 2.5,
+            "trades": 4,
+            "wins": 3,
+            "losses": 1,
+        },
+        "openCostBasisUsdt": 50.0,
+        "anomalies": [],
+    }
+
+    bootstrap = engine._bootstrap_runtime_state(
+        state={"paperStartUsdt": 10_000.0, "paperStartBtc": 1.0},
+        runtime_state={
+            "paper": {"usdt": 7_000.0, "btc": 0.75},
+            "stats": {"day": "2026-05-05", "max_drawdown_pct": 0.08, "peak_equity": 11_000.0},
+        },
+        reconciled=reconciled,
+        persisted_cum={},
+        engine_pid=123,
+        is_fresh_start=False,
+        symbol="BTCUSDT",
+        interval="15m",
+        now=now,
+    )
+
+    assert bootstrap.paper == engine.PaperAccount(usdt=900.0, btc=0.25)
+    assert bootstrap.stats.day == "2026-05-05"
+    assert bootstrap.stats.trades == 4
+    assert bootstrap.stats.wins == 3
+    assert bootstrap.stats.losses == 1
+    assert bootstrap.stats.pnl_usdt == 12.5
+    assert bootstrap.stats.max_drawdown_pct == 0.08
+    assert bootstrap.stats.peak_equity == 11_000.0
+
+
+def test_bootstrap_runtime_state_preserves_existing_cumulative_since_utc():
+    since = "2026-05-05T00:00:00+00:00"
+    reconciled = {
+        "paper": {"usdt": 1000.0, "btc": 0.0},
+        "cumulative": {
+            "sinceUtc": None,
+            "realizedPnlUsdt": 3.0,
+            "grossRealizedPnlUsdt": 4.0,
+            "feesPaidUsdt": 1.0,
+            "trades": 2,
+            "wins": 1,
+            "losses": 1,
+        },
+        "openCostBasisUsdt": 0.0,
+        "anomalies": [],
+    }
+    persisted = {
+        "sinceUtc": since,
+        "realizedPnlUsdt": 3.0,
+        "grossRealizedPnlUsdt": 4.0,
+        "feesPaidUsdt": 1.0,
+        "trades": 2,
+        "wins": 1,
+        "losses": 1,
+    }
+
+    bootstrap = engine._bootstrap_runtime_state(
+        state={},
+        runtime_state={},
+        reconciled=reconciled,
+        persisted_cum=persisted,
+        engine_pid=123,
+        is_fresh_start=False,
+        symbol="BTCUSDT",
+        interval="15m",
+        now=datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc),
+    )
+
+    assert bootstrap.cumulative["sinceUtc"] == since
+    assert bootstrap.changed_cumulative is False
+
+
+def test_bootstrap_runtime_state_uses_now_for_missing_since_utc():
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+
+    bootstrap = engine._bootstrap_runtime_state(
+        state={},
+        runtime_state={},
+        reconciled={
+            "paper": {"usdt": 1000.0, "btc": 0.0},
+            "cumulative": {"trades": 0, "wins": 0, "losses": 0},
+            "openCostBasisUsdt": 0.0,
+            "anomalies": [],
+        },
+        persisted_cum={},
+        engine_pid=123,
+        is_fresh_start=False,
+        symbol="BTCUSDT",
+        interval="15m",
+        now=now,
+    )
+
+    assert bootstrap.cumulative["sinceUtc"] == now.isoformat()
+    assert bootstrap.changed_cumulative is True
+
+
+def test_bootstrap_runtime_state_restores_grid_cost_basis():
+    runtime_grid = engine.GridState(
+        anchor=100.0,
+        spacing_pct=0.01,
+        levels=2,
+        max_exposure_pct=0.35,
+        reserved_usdt=50.0,
+        reserved_btc=0.1,
+        cost_basis_usdt=25.0,
+        orders=[],
+        active=True,
+    )
+
+    bootstrap = engine._bootstrap_runtime_state(
+        state={},
+        runtime_state={"grid": engine._serialize_grid(runtime_grid)},
+        reconciled={
+            "paper": {"usdt": 1000.0, "btc": 0.1},
+            "cumulative": {"trades": 0, "wins": 0, "losses": 0},
+            "openCostBasisUsdt": 40.0,
+            "anomalies": [],
+        },
+        persisted_cum={},
+        engine_pid=123,
+        is_fresh_start=False,
+        symbol="BTCUSDT",
+        interval="15m",
+        now=datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc),
+    )
+
+    assert bootstrap.grid is not None
+    assert bootstrap.grid.cost_basis_usdt == 40.0
+
+
+def test_bootstrap_runtime_state_clears_grid_when_no_btc():
+    runtime_grid = engine.GridState(
+        anchor=100.0,
+        spacing_pct=0.01,
+        levels=2,
+        max_exposure_pct=0.35,
+        reserved_usdt=50.0,
+        reserved_btc=0.1,
+        cost_basis_usdt=25.0,
+        orders=[engine.GridOrder(side="BUY", price=99.0, qty_btc=0.01)],
+        active=True,
+    )
+
+    bootstrap = engine._bootstrap_runtime_state(
+        state={},
+        runtime_state={"grid": engine._serialize_grid(runtime_grid)},
+        reconciled={
+            "paper": {"usdt": 1000.0, "btc": 0.0},
+            "cumulative": {"trades": 0, "wins": 0, "losses": 0},
+            "openCostBasisUsdt": 25.0,
+            "anomalies": [],
+        },
+        persisted_cum={},
+        engine_pid=123,
+        is_fresh_start=False,
+        symbol="BTCUSDT",
+        interval="15m",
+        now=datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc),
+    )
+
+    assert bootstrap.grid is not None
+    assert bootstrap.grid.active is False
+    assert bootstrap.grid.orders == []
+    assert bootstrap.grid.reserved_btc == 0.0
+    assert bootstrap.grid.cost_basis_usdt == 0.0
+    assert bootstrap.has_open_position is False
+
+
+def test_bootstrap_runtime_state_fresh_start_builds_engine_start_event():
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+
+    bootstrap = engine._bootstrap_runtime_state(
+        state={"mode": "paper"},
+        runtime_state={},
+        reconciled={
+            "paper": {"usdt": 1000.0, "btc": 0.0},
+            "cumulative": {"trades": 0, "wins": 0, "losses": 0},
+            "openCostBasisUsdt": 0.0,
+            "anomalies": [],
+        },
+        persisted_cum={},
+        engine_pid=123,
+        is_fresh_start=True,
+        symbol="BTCUSDT",
+        interval="15m",
+        now=now,
+    )
+
+    assert bootstrap.startup_event_name == "ENGINE_START"
+    assert bootstrap.startup_event == {
+        "tsUtc": now.isoformat(),
+        "event": "ENGINE_START",
+        "mode": "paper",
+        "symbol": "BTCUSDT",
+        "paper": True,
+        "enginePid": 123,
+        "hasOpenPosition": False,
+    }
+    assert bootstrap.startup_log == (
+        "ENGINE_START mode=paper symbol=BTCUSDT interval=15m "
+        "paper_equity_init_usdt=1000.0 paper_btc_init=0.0"
+    )
+
+
+def test_bootstrap_runtime_state_fresh_start_builds_engine_resume_event():
+    bootstrap = engine._bootstrap_runtime_state(
+        state={"mode": "paper"},
+        runtime_state={},
+        reconciled={
+            "paper": {"usdt": 1000.0, "btc": 0.25},
+            "cumulative": {"trades": 0, "wins": 0, "losses": 0},
+            "openCostBasisUsdt": 500.0,
+            "anomalies": [],
+        },
+        persisted_cum={},
+        engine_pid=123,
+        is_fresh_start=True,
+        symbol="BTCUSDT",
+        interval="15m",
+        now=datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc),
+    )
+
+    assert bootstrap.has_open_position is True
+    assert bootstrap.startup_event_name == "ENGINE_RESUME"
+    assert bootstrap.startup_event["event"] == "ENGINE_RESUME"
+    assert bootstrap.startup_event["hasOpenPosition"] is True
+
+
+def test_bootstrap_runtime_state_non_fresh_start_has_no_startup_event():
+    bootstrap = engine._bootstrap_runtime_state(
+        state={"mode": "paper"},
+        runtime_state={},
+        reconciled={
+            "paper": {"usdt": 1000.0, "btc": 0.25},
+            "cumulative": {"trades": 0, "wins": 0, "losses": 0},
+            "openCostBasisUsdt": 500.0,
+            "anomalies": [],
+        },
+        persisted_cum={},
+        engine_pid=123,
+        is_fresh_start=False,
+        symbol="BTCUSDT",
+        interval="15m",
+        now=datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc),
+    )
+
+    assert bootstrap.startup_event_name is None
+    assert bootstrap.startup_event is None
+    assert bootstrap.startup_log is None
+
+
+def test_bootstrap_runtime_state_parses_cooldown_until():
+    cooldown_until = "2026-05-06T12:30:00+00:00"
+
+    bootstrap = engine._bootstrap_runtime_state(
+        state={},
+        runtime_state={"stats": {"cooldown_until": cooldown_until}},
+        reconciled={
+            "paper": {"usdt": 1000.0, "btc": 0.0},
+            "cumulative": {"trades": 0, "wins": 0, "losses": 0},
+            "openCostBasisUsdt": 0.0,
+            "anomalies": [],
+        },
+        persisted_cum={},
+        engine_pid=123,
+        is_fresh_start=False,
+        symbol="BTCUSDT",
+        interval="15m",
+        now=datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc),
+    )
+
+    assert bootstrap.stats.cooldown_until == datetime(2026, 5, 6, 12, 30, tzinfo=timezone.utc)
+
+
 def test_snapshot_signature_and_rounding_are_stable():
     assert engine._stable_signature({"b": 2, "a": 1}) == '{"a":1,"b":2}'
     assert engine._round_snapshot_value(
