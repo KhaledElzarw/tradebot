@@ -754,6 +754,20 @@ class Stats:
     cooldown_until: datetime | None = None
 
 
+@dataclass
+class _EngineBootstrap:
+    paper: PaperAccount
+    stats: Stats
+    cumulative: dict
+    changed_cumulative: bool
+    grid: GridState | None
+    has_open_position: bool
+    anomalies: list[str]
+    startup_event_name: str | None
+    startup_event: dict | None
+    startup_log: str | None
+
+
 def _day_key(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%d")
 
@@ -786,6 +800,84 @@ def _daily_stop_decision(
         else 0.0
     )
     return daily_loss_pct >= max_daily_loss_pct, daily_loss_pct
+
+
+def _bootstrap_runtime_state(
+    *,
+    state: dict,
+    runtime_state: dict,
+    reconciled: dict,
+    persisted_cum: dict,
+    engine_pid: int,
+    is_fresh_start: bool,
+    symbol: str,
+    interval: str,
+    now: datetime,
+) -> _EngineBootstrap:
+    paper_state = runtime_state.get("paper") or {}
+    paper = PaperAccount(
+        usdt=float(reconciled["paper"].get("usdt", paper_state.get("usdt", state.get("paperStartUsdt", 10000.0)))),
+        btc=float(reconciled["paper"].get("btc", paper_state.get("btc", state.get("paperStartBtc", 0.0)))),
+    )
+
+    stats_state = runtime_state.get("stats") or {}
+    reconciled_cum = dict(reconciled["cumulative"])
+    stats = Stats(
+        day=stats_state.get("day", _day_key(now)),
+        trades=int(reconciled_cum.get("trades", 0)),
+        wins=int(reconciled_cum.get("wins", 0)),
+        losses=int(reconciled_cum.get("losses", 0)),
+        pnl_usdt=float(reconciled_cum.get("realizedPnlUsdt", 0.0)),
+        max_drawdown_pct=float(stats_state.get("max_drawdown_pct", 0.0)),
+        peak_equity=float(stats_state.get("peak_equity", 0.0)),
+        cooldown_until=datetime.fromisoformat(stats_state["cooldown_until"]) if stats_state.get("cooldown_until") else None,
+    )
+
+    reconciled_cum["sinceUtc"] = persisted_cum.get("sinceUtc") or now.isoformat()
+    changed_cum = any(persisted_cum.get(k) != reconciled_cum.get(k) for k in reconciled_cum.keys())
+    cumulative = _normalize_cumulative(reconciled_cum)
+
+    grid: GridState | None = _deserialize_grid(runtime_state.get("grid"))
+    if grid is not None:
+        grid.cost_basis_usdt = float(reconciled.get("openCostBasisUsdt", grid.cost_basis_usdt) or 0.0)
+        if paper.btc <= 0:
+            grid.active = False
+            grid.orders = []
+            grid.reserved_btc = 0.0
+            grid.cost_basis_usdt = 0.0
+
+    has_open_position = paper.btc > 0 or bool(grid and grid.active)
+    startup_event_name = None
+    startup_event = None
+    startup_log = None
+    if is_fresh_start:
+        startup_event_name = "ENGINE_RESUME" if has_open_position else "ENGINE_START"
+        startup_log = (
+            f"{startup_event_name} mode={state.get('mode')} symbol={symbol} interval={interval} "
+            f"paper_equity_init_usdt={paper.usdt} paper_btc_init={paper.btc}"
+        )
+        startup_event = {
+            "tsUtc": now.isoformat(),
+            "event": startup_event_name,
+            "mode": state.get("mode"),
+            "symbol": symbol,
+            "paper": True,
+            "enginePid": engine_pid,
+            "hasOpenPosition": has_open_position,
+        }
+
+    return _EngineBootstrap(
+        paper=paper,
+        stats=stats,
+        cumulative=cumulative,
+        changed_cumulative=changed_cum,
+        grid=grid,
+        has_open_position=has_open_position,
+        anomalies=list(reconciled.get("anomalies") or []),
+        startup_event_name=startup_event_name,
+        startup_event=startup_event,
+        startup_log=startup_log,
+    )
 
 
 def _inactive_reason(state: dict, stats: Stats, now: datetime) -> str | None:
@@ -1226,58 +1318,34 @@ def main():
         start_usdt=float(state.get("paperStartUsdt", 10000.0)),
         start_btc=float(state.get("paperStartBtc", 0.0)),
     )
-    paper_state = runtime_state.get("paper") or {}
-    paper = PaperAccount(
-        usdt=float(reconciled["paper"].get("usdt", paper_state.get("usdt", state.get("paperStartUsdt", 10000.0)))),
-        btc=float(reconciled["paper"].get("btc", paper_state.get("btc", state.get("paperStartBtc", 0.0)))),
+    persisted_cum = _read_cum()
+    bootstrap = _bootstrap_runtime_state(
+        state=state,
+        runtime_state=runtime_state,
+        reconciled=reconciled,
+        persisted_cum=persisted_cum,
+        engine_pid=engine_pid,
+        is_fresh_start=is_fresh_start,
+        symbol=symbol,
+        interval=interval,
+        now=_utc_now(),
     )
+    paper = bootstrap.paper
+    stats = bootstrap.stats
+    cum = bootstrap.cumulative
+    grid = bootstrap.grid
+    has_open_position = bootstrap.has_open_position
 
-    stats_state = runtime_state.get("stats") or {}
-    reconciled_cum = dict(reconciled["cumulative"])
-    stats = Stats(
-        day=stats_state.get("day", _day_key(_utc_now())),
-        trades=int(reconciled_cum.get("trades", 0)),
-        wins=int(reconciled_cum.get("wins", 0)),
-        losses=int(reconciled_cum.get("losses", 0)),
-        pnl_usdt=float(reconciled_cum.get("realizedPnlUsdt", 0.0)),
-        max_drawdown_pct=float(stats_state.get("max_drawdown_pct", 0.0)),
-        peak_equity=float(stats_state.get("peak_equity", 0.0)),
-        cooldown_until=datetime.fromisoformat(stats_state["cooldown_until"]) if stats_state.get("cooldown_until") else None,
-    )
-
-    cum = _read_cum()
-    reconciled_cum["sinceUtc"] = cum.get("sinceUtc") or _utc_now().isoformat()
-    changed_cum = any(cum.get(k) != reconciled_cum.get(k) for k in reconciled_cum.keys())
-    cum = _normalize_cumulative(reconciled_cum)
-    if changed_cum:
+    if bootstrap.changed_cumulative:
         _write_cum(cum)
 
-    if reconciled.get("anomalies"):
-        _log(f"ACCOUNTING_RECONCILE anomalies={'; '.join(reconciled['anomalies'])}")
+    if bootstrap.anomalies:
+        _log(f"ACCOUNTING_RECONCILE anomalies={'; '.join(bootstrap.anomalies)}")
 
-    grid: GridState | None = _deserialize_grid(runtime_state.get("grid"))
-    if grid is not None:
-        grid.cost_basis_usdt = float(reconciled.get("openCostBasisUsdt", grid.cost_basis_usdt) or 0.0)
-        if paper.btc <= 0:
-            grid.active = False
-            grid.orders = []
-            grid.reserved_btc = 0.0
-            grid.cost_basis_usdt = 0.0
-
-    has_open_position = paper.btc > 0 or bool(grid and grid.active)
-    if is_fresh_start:
-        startup_event_name = "ENGINE_RESUME" if has_open_position else "ENGINE_START"
-        _log(f"{startup_event_name} mode={state.get('mode')} symbol={symbol} interval={interval} paper_equity_init_usdt={paper.usdt} paper_btc_init={paper.btc}")
-        start_event = {
-            "tsUtc": _utc_now().isoformat(),
-            "event": startup_event_name,
-            "mode": state.get("mode"),
-            "symbol": symbol,
-            "paper": True,
-            "enginePid": engine_pid,
-            "hasOpenPosition": has_open_position,
-        }
-        _append_trade(start_event)
+    if bootstrap.startup_log:
+        _log(bootstrap.startup_log)
+    if bootstrap.startup_event:
+        _append_trade(bootstrap.startup_event)
 
     while True:
         state = _read_json(STATE_PATH)
