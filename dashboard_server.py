@@ -588,7 +588,7 @@ def _agent_report_summary(role: str, report: dict) -> dict:
         evidence_items = evidence
     elif evidence:
         evidence_items = [evidence]
-    else:
+    else:  # pragma: no cover - evidence is normalized to [] before this defensive fallback.
         evidence_items = []
     return {
         "role": _safe_text(role, max_chars=80) or "",

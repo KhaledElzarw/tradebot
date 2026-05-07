@@ -217,12 +217,72 @@ def test_read_ai_decisions_caps_and_orders_newest_first(monkeypatch, tmp_path):
     assert rows[-1]["decisionId"] == "decision-10"
 
 
+def test_read_ai_decisions_covers_malformed_runtime_edges(monkeypatch, tmp_path):
+    decisions_path = tmp_path / "ai_decisions.jsonl"
+    decisions_path.write_text(
+        "\n".join([
+            "",
+            "[]",
+            json.dumps({"unrelated": True}),
+            json.dumps({
+                "decisionId": "edge-row",
+                "riskAction": "allow_grid",
+                "reports": "bad-shape",
+                "keyRisks": "single risk",
+            }),
+        ])
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(dashboard_server, "AI_DECISIONS_PATH", decisions_path)
+
+    rows = dashboard_server.read_ai_decisions(limit="not-a-number")
+
+    assert len(rows) == 1
+    assert rows[0]["decisionId"] == "edge-row"
+    assert rows[0]["agents"] == []
+    assert rows[0]["keyRisks"] == ["single risk"]
+
+
+def test_read_ai_decisions_returns_empty_when_file_read_fails(monkeypatch):
+    class BrokenDecisionsPath:
+        def exists(self):
+            return True
+
+        def is_file(self):
+            return True
+
+        def read_text(self, **kwargs):
+            raise OSError("cannot read")
+
+    monkeypatch.setattr(dashboard_server, "AI_DECISIONS_PATH", BrokenDecisionsPath())
+
+    assert dashboard_server.read_ai_decisions() == []
+
+
+def test_normalized_ai_decision_row_rejects_duck_typed_non_dict():
+    class RowLike:
+        def get(self, key):
+            return None
+
+    assert dashboard_server._normalized_ai_decision_row(RowLike(), {}, {}) is None
+
+
 def test_ai_decision_impact_helpers_tolerate_missing_values():
     realized = dashboard_server._realized_impact({}, {}, {})
 
     assert dashboard_server._projected_impact({}).startswith("Hold current")
+    assert dashboard_server._projected_impact({"riskAction": "sells_only"}).startswith("Let sell-side")
+    assert dashboard_server._projected_impact({
+        "riskAction": "reduce_exposure",
+        "recommendedMaxExposurePct": 0.25,
+    }).startswith("Lower exposure budget toward 25.0%")
+    assert dashboard_server._projected_impact({"riskAction": "flatten"}).startswith("Recommend exiting")
     assert dashboard_server._pct_delta(10, 0) is None
     assert dashboard_server._safe_num("nan", 7.0) == 7.0
+    assert dashboard_server._safe_text("   ") is None
+    assert dashboard_server._safe_text_list("single risk") == ["single risk"]
+    assert dashboard_server._agent_report_summary("risk_manager", {})["evidence"] == []
     assert realized["equityDeltaUsdt"] is None
     assert realized["priceDeltaPct"] is None
 
