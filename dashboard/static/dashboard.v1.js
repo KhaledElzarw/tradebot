@@ -4,6 +4,8 @@ const MIN_SPAN = 6;
 const TIMEFRAMES = ['1s', '1m', '5m', '30m', '1h', '1d', '1w', '1M'];
 const TIMEFRAME_LABELS = { '1s': '1 Second', '1m': '1 Minute', '5m': '5 Minutes', '30m': '30 Minutes', '1h': '1 Hour', '1d': '1 Day', '1w': '1 Week', '1M': '1 Month' };
 const DEFAULT_LIMITS = { '1s': 240, '1m': 180, '5m': 180, '30m': 180, '1h': 240, '1d': 180, '1w': 120, '1M': 120 };
+const GRID_MODE_LABELS = { scalpy: 'Scalpy', fatty: 'Fatty' };
+const LEGACY_OPTIMIZED_MODES = new Set(['flexy', 'ai_optimized']);
 const INITIAL_QUERY = new URLSearchParams(window.location.search);
 function normalizeInitialTimeframe(tf) { return TIMEFRAMES.includes(tf) ? tf : '1m'; }
 const CONFIG_FIELDS = [
@@ -214,6 +216,13 @@ function acceptPayloadSeq(channel, seq, instanceId = null) {
   return true;
 }
 function getLayoutKey() { return 'tradebot-layout-v7'; }
+function dashboardModeLabel(state, aiEnabled) {
+  const suffix = aiEnabled ? 'Local AI' : 'Rules';
+  const mode = String((state && state.gridMode) || '').trim().toLowerCase();
+  if (Object.prototype.hasOwnProperty.call(GRID_MODE_LABELS, mode)) return `${GRID_MODE_LABELS[mode]} + ${suffix}`;
+  if (LEGACY_OPTIMIZED_MODES.has(mode)) return aiEnabled ? 'Optimized AI' : 'Rules';
+  return `Grid + ${suffix}`;
+}
 function persistChartViewport() {
   localStorage.setItem('tradebot-chart-limit', String(Math.max(30, Math.min(1000, Number(stateUi.candleLimit || 180)))));
   localStorage.setItem('tradebot-chart-pan-offset', String(Math.max(0, Number(stateUi.panOffset || 0))));
@@ -335,7 +344,7 @@ function renderStickySummary(status, cumulative, runtime, grid) {
     }
   }
   setTextIfPresent('trading-state-label', stateLabel);
-  setTextIfPresent('state-mode', `${String((stateUi.lastState && stateUi.lastState.gridMode) || 'grid')} + ${aiEnabled ? 'Local AI' : 'Rules'}`);
+  setTextIfPresent('state-mode', dashboardModeLabel(stateUi.lastState || {}, aiEnabled));
   const riskEl = setTextIfPresent('state-risk', exposure > 0.85 ? 'High' : (exposure > 0.55 ? 'Normal' : 'Light'));
   if (riskEl) riskEl.className = exposure > 0.85 ? 'negative' : 'positive';
   setTextIfPresent('state-exposure', fmtPct(exposure));

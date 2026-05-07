@@ -689,10 +689,16 @@ def test_summary_and_chart_renderers_tolerate_missing_optional_targets(tmp_path)
         stateUi,
         renderStickySummary,
         drawCandles,
+        dashboardModeLabel,
       };
     `, sandbox);
 
     const t = sandbox.__rendererTest;
+    assert.strictEqual(t.dashboardModeLabel({ gridMode: 'scalpy' }, true), 'Scalpy + Local AI');
+    assert.strictEqual(t.dashboardModeLabel({ gridMode: 'fatty' }, false), 'Fatty + Rules');
+    assert.strictEqual(t.dashboardModeLabel({ gridMode: 'flexy' }, true), 'Optimized AI');
+    assert.strictEqual(t.dashboardModeLabel({ gridMode: 'ai_optimized' }, false), 'Rules');
+    assert.strictEqual(t.dashboardModeLabel({ gridMode: 'legacy' }, true), 'Grid + Local AI');
     t.stateUi.lastState = { aiEnabled: true, gridMode: 'scalpy' };
     assert.doesNotThrow(() => t.renderStickySummary(
       {

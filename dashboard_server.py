@@ -172,7 +172,7 @@ HTML = r'''<!doctype html>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Tradebot Live Dashboard</title>
-  <link rel="stylesheet" href="/static/dashboard.v1.css?v=9">
+  <link rel="stylesheet" href="/static/dashboard.v1.css?v=10">
 </head>
 <body>
 <div class="wrap">
@@ -344,7 +344,7 @@ HTML = r'''<!doctype html>
     </section>
   </div>
 </div>
-<script src="/static/dashboard.v1.js?v=9"></script>
+<script src="/static/dashboard.v1.js?v=10"></script>
 </body>
 </html>'''
 
@@ -1133,6 +1133,17 @@ def _signed_class(value) -> str:
     return "positive" if value > 0 else ("negative" if value < 0 else "")
 
 
+def dashboard_mode_label(state: dict) -> str:
+    ai_enabled = state.get("aiEnabled", True) is not False
+    suffix = "Local AI" if ai_enabled else "Rules"
+    mode = str(state.get("gridMode") or "").strip().lower()
+    if mode in {"scalpy", "fatty"}:
+        return f"{mode.capitalize()} + {suffix}"
+    if mode in {"flexy", "ai_optimized"}:
+        return "Optimized AI" if ai_enabled else "Rules"
+    return f"Grid + {suffix}"
+
+
 def _strip_html(text: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", text or "")).strip()
 
@@ -1582,7 +1593,7 @@ def render_initial_dashboard_html(interval_override: str | None = None) -> str:
     fresh_label = f"Live payload - {freshness:.2f}s" if freshness is not None else "No timestamp"
     state_label = "PAUSED" if state.get("paused") else ("LIVE / AI-GATED" if state.get("aiEnabled", True) else "LIVE / GRID")
     risk = "High" if exposure > 0.85 else ("Normal" if exposure > 0.55 else "Light")
-    mode = f"{state.get('gridMode') or 'grid'} + {'Local AI' if state.get('aiEnabled', True) else 'Rules'}"
+    mode = dashboard_mode_label(state)
     metrics_html = "".join(
         f'<div class="metric" data-summary-key="{key}"><div class="label">{label}</div><div class="value {cls}" id="summary-{key}">{value}</div></div>'
         for key, label, value, cls in [
