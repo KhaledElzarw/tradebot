@@ -55,15 +55,21 @@ def test_dashboard_boot_tolerates_cards_without_heads(tmp_path):
     const ids = [
       'theme-toggle','bot-toggle-btn','ai-toggle-btn','reset-layout-btn','events-first-btn','events-prev-btn','events-next-btn','events-last-btn',
       'orders-tab-open-btn','orders-tab-history-btn','orders-filter-buy-btn','orders-filter-sell-btn','orders-first-btn','orders-prev-btn','orders-next-btn','orders-last-btn',
-      'config-save-btn','dashboard','summary-card','market-card','intelligence-card','regime-card','macro-card','events-card','orders-card','config-card','status-card',
+      'config-open-btn','config-close-btn','config-save-btn','config-modal',
+      'dashboard','summary-card','market-card','intelligence-card','regime-card',
+      'completed-macro-card','upcoming-macro-card','events-card','orders-card',
+      'config-card','status-card',
       'fresh-label','server-time','sticky-summary','trading-state-label','state-mode','state-risk','state-exposure','state-action','chart-price-pill','chart-quote-line',
       'status-list','events-body','events-page-indicator','orders-body','orders-page-indicator','timeframe-controls','news-stack','signal-table','final-regime-title',
-      'final-regime-copy','regime-updated','macro-calendar','config-form-grid','market-legend','hover-ohlcv','latest-candle','market-chart','chart-stream-status','boot-error','top-timeframe'
+      'final-regime-copy','regime-updated','completed-macro-calendar',
+      'upcoming-macro-calendar','config-form-grid','market-legend','hover-ohlcv',
+      'latest-candle','market-chart','chart-stream-status','boot-error','top-timeframe'
     ];
     const elements = new Map(ids.map(id => [id, makeElement(id)]));
     const cards = [
-      'summary-card','market-card','intelligence-card','regime-card','macro-card',
-      'events-card','orders-card','config-card','status-card',
+      'summary-card','market-card','intelligence-card','regime-card',
+      'completed-macro-card','upcoming-macro-card','events-card','orders-card',
+      'config-card','status-card',
     ].map(id => elements.get(id));
     cards.forEach(card => {
       card.dataset.defaultSpan = '8';
@@ -222,22 +228,26 @@ def test_refresh_tolerates_missing_optional_refresh_controls(tmp_path):
       'events-first-btn','events-prev-btn','events-next-btn','events-last-btn',
       'orders-tab-open-btn','orders-tab-history-btn','orders-filter-buy-btn',
       'orders-filter-sell-btn','orders-first-btn','orders-prev-btn',
-      'orders-next-btn','orders-last-btn','config-save-btn','dashboard',
-      'summary-card','market-card','intelligence-card','regime-card','macro-card',
+      'orders-next-btn','orders-last-btn','config-open-btn','config-close-btn',
+      'config-save-btn','config-modal','dashboard',
+      'summary-card','market-card','intelligence-card','regime-card',
+      'completed-macro-card','upcoming-macro-card',
       'events-card','orders-card','config-card','status-card','fresh-label',
       'server-time','sticky-summary','trading-state-label','state-mode',
       'state-risk','state-exposure','state-action','chart-price-pill',
       'chart-quote-line','status-list','events-body','events-page-indicator',
       'orders-body','orders-page-indicator','timeframe-controls','news-stack',
       'signal-table','final-regime-title','final-regime-copy','regime-updated',
-      'macro-calendar','config-form-grid','market-legend','hover-ohlcv',
+      'completed-macro-calendar','upcoming-macro-calendar',
+      'config-form-grid','market-legend','hover-ohlcv',
       'latest-candle','market-chart','chart-stream-status','boot-error',
       'top-timeframe'
     ];
     const elements = new Map(ids.map(id => [id, makeElement(id)]));
     const cards = [
-      'summary-card','market-card','intelligence-card','regime-card','macro-card',
-      'events-card','orders-card','config-card','status-card',
+      'summary-card','market-card','intelligence-card','regime-card',
+      'completed-macro-card','upcoming-macro-card','events-card','orders-card',
+      'config-card','status-card',
     ].map(id => elements.get(id));
     cards.forEach(card => {
       card.dataset.defaultSpan = '8';
@@ -431,16 +441,22 @@ def test_ai_decisions_renderer_and_refresh_paths_are_safe(tmp_path):
       'agent-proposals','agent-chat-input','agent-chat-send-btn',
       'orders-filter-buy-btn','orders-filter-sell-btn','orders-first-btn',
       'orders-prev-btn','orders-next-btn','orders-last-btn','config-save-btn',
+      'config-open-btn','config-close-btn','config-modal',
       'fresh-label','server-time','sticky-summary','trading-state-label',
       'state-mode','state-risk','state-exposure','state-action','chart-price-pill',
       'chart-quote-line','status-list','events-body','events-page-indicator',
       'ai-decisions-body','ai-decisions-page-indicator','orders-body',
       'orders-page-indicator','timeframe-controls','news-stack','signal-table',
-      'final-regime-title','final-regime-copy','regime-updated','macro-calendar',
-      'macro-calendar-month-filter','macro-calendar-year-filter',
-      'macro-calendar-event-filter','macro-calendar-first-btn',
-      'macro-calendar-prev-btn','macro-calendar-next-btn',
-      'macro-calendar-last-btn','macro-calendar-page-indicator',
+      'final-regime-title','final-regime-copy','regime-updated',
+      'completed-macro-calendar','completed-macro-month-filter',
+      'completed-macro-year-filter','completed-macro-event-filter',
+      'completed-macro-first-btn','completed-macro-prev-btn',
+      'completed-macro-next-btn','completed-macro-last-btn',
+      'completed-macro-page-indicator','upcoming-macro-calendar',
+      'upcoming-macro-month-filter','upcoming-macro-year-filter',
+      'upcoming-macro-event-filter','upcoming-macro-first-btn',
+      'upcoming-macro-prev-btn','upcoming-macro-next-btn',
+      'upcoming-macro-last-btn','upcoming-macro-page-indicator',
       'config-form-grid','market-legend','hover-ohlcv','latest-candle',
       'market-chart','chart-stream-status','boot-error','top-timeframe'
     ];
@@ -544,6 +560,8 @@ def test_ai_decisions_renderer_and_refresh_paths_are_safe(tmp_path):
         changeMacroCalendarPage,
         macroCalendarEvents,
         macroCalendarPageRows,
+        openConfigModal,
+        closeConfigModal,
         applyLiveMarketPayload,
         refresh,
       };
@@ -601,35 +619,54 @@ def test_ai_decisions_renderer_and_refresh_paths_are_safe(tmp_path):
     }));
     assert.ok(body.innerHTML.includes('live-row'));
     assert.ok(elements.get('server-time').textContent.includes('GST'));
-    assert.ok(elements.get('macro-calendar').innerHTML.includes('May 7'));
-    assert.ok(elements.get('macro-calendar').innerHTML.includes('Completed -'));
-    assert.ok(elements.get('macro-calendar').innerHTML.includes('Upcoming -'));
-    assert.ok(!elements.get('macro-calendar').innerHTML.includes('May 1'));
-    assert.strictEqual((elements.get('macro-calendar').innerHTML.match(/class="calendar-row/g) || []).length, 10);
-    assert.ok(elements.get('macro-calendar-page-indicator').textContent.includes('Page 1 /'));
-    assert.ok(elements.get('macro-calendar-year-filter').innerHTML.includes('2025'));
-    assert.ok(elements.get('macro-calendar-year-filter').innerHTML.includes('2027'));
+    assert.ok(elements.get('completed-macro-calendar').innerHTML.includes('May 7'));
+    assert.ok(elements.get('completed-macro-calendar').innerHTML.includes('Completed -'));
+    assert.ok(!elements.get('completed-macro-calendar').innerHTML.includes('Upcoming -'));
+    assert.ok(!elements.get('completed-macro-calendar').innerHTML.includes('May 1'));
+    assert.ok(elements.get('upcoming-macro-calendar').innerHTML.includes('May 7'));
+    assert.ok(elements.get('upcoming-macro-calendar').innerHTML.includes('Upcoming -'));
+    assert.ok(!elements.get('upcoming-macro-calendar').innerHTML.includes('Completed -'));
+    assert.strictEqual(
+      (elements.get('completed-macro-calendar').innerHTML.match(/class="calendar-row/g) || []).length,
+      10,
+    );
+    assert.strictEqual(
+      (elements.get('upcoming-macro-calendar').innerHTML.match(/class="calendar-row/g) || []).length,
+      10,
+    );
+    assert.ok(elements.get('completed-macro-page-indicator').textContent.includes('Page 1 /'));
+    assert.ok(elements.get('upcoming-macro-page-indicator').textContent.includes('Page 1 /'));
+    assert.ok(elements.get('completed-macro-year-filter').innerHTML.includes('2025'));
+    assert.ok(elements.get('upcoming-macro-year-filter').innerHTML.includes('2027'));
 
     (async () => {
       await assert.doesNotReject(async () => t.refresh());
       assert.ok(body.innerHTML.includes('refresh-row'));
       assert.ok(elements.get('server-time').textContent.includes('GST'));
-      assert.ok(elements.get('macro-calendar').innerHTML.includes('May 7'));
-      assert.ok(!elements.get('macro-calendar').innerHTML.includes('May 1'));
-      assert.strictEqual((elements.get('macro-calendar').innerHTML.match(/class="calendar-row/g) || []).length, 10);
-      assert.doesNotThrow(() => t.changeMacroCalendarPage('next'));
-      assert.ok(elements.get('macro-calendar-page-indicator').textContent.startsWith('Page 2 /'));
-      t.stateUi.macroCalendarMonthFilter = '5';
-      t.stateUi.macroCalendarYearFilter = '2026';
-      t.stateUi.macroCalendarEventFilter = 'US Data Window';
-      t.stateUi.macroCalendarPage = 0;
+      assert.ok(elements.get('completed-macro-calendar').innerHTML.includes('May 7'));
+      assert.ok(!elements.get('completed-macro-calendar').innerHTML.includes('May 1'));
+      assert.strictEqual(
+        (elements.get('completed-macro-calendar').innerHTML.match(/class="calendar-row/g) || []).length,
+        10,
+      );
+      assert.doesNotThrow(() => t.changeMacroCalendarPage('completed', 'next'));
+      assert.ok(elements.get('completed-macro-page-indicator').textContent.startsWith('Page 2 /'));
+      t.stateUi.macroCalendars.completed.monthFilter = '5';
+      t.stateUi.macroCalendars.completed.yearFilter = '2025';
+      t.stateUi.macroCalendars.completed.eventFilter = 'US Data Window';
+      t.stateUi.macroCalendars.completed.page = 0;
       assert.doesNotThrow(() => t.renderMacroCalendar('2026-05-07T13:00:00+00:00'));
-      const filteredCalendar = elements.get('macro-calendar').innerHTML;
+      const filteredCalendar = elements.get('completed-macro-calendar').innerHTML;
       assert.strictEqual((filteredCalendar.match(/class="calendar-row/g) || []).length, 10);
       assert.ok(filteredCalendar.includes('US Data Window'));
       assert.ok(!filteredCalendar.includes('Asia Liquidity Open'));
+      assert.strictEqual(elements.get('config-modal').hidden, undefined);
+      assert.doesNotThrow(() => t.openConfigModal());
+      assert.strictEqual(elements.get('config-modal').hidden, false);
+      assert.doesNotThrow(() => t.closeConfigModal());
+      assert.strictEqual(elements.get('config-modal').hidden, true);
       const renderedNews = elements.get('news-stack').innerHTML;
-      assert.strictEqual((renderedNews.match(/class="news-card"/g) || []).length, 5);
+      assert.strictEqual((renderedNews.match(/class="news-card"/g) || []).length, 10);
       assert.ok(renderedNews.includes('Bitcoin raw rise'));
     })().catch(err => {
       console.error(err);

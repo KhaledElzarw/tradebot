@@ -71,7 +71,7 @@ NEWS_SOURCES = [
     ("Decrypt", "https://decrypt.co/feed"),
     ("The Block", "https://www.theblock.co/rss.xml"),
 ]
-NEWS_CARD_LIMIT = 5
+NEWS_CARD_LIMIT = 10
 MACRO_CALENDAR_PAGE_SIZE = 10
 MACRO_CALENDAR_SIDE_SIZE = 5
 MACRO_CALENDAR_LOOKBACK_MONTHS = 12
@@ -226,7 +226,7 @@ HTML = r'''<!doctype html>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Tradebot Live Dashboard</title>
-  <link rel="stylesheet" href="/static/dashboard.v1.css?v=13">
+  <link rel="stylesheet" href="/static/dashboard.v1.css?v=14">
 </head>
 <body>
 <div class="wrap">
@@ -306,23 +306,44 @@ HTML = r'''<!doctype html>
       </div>
     </section>
 
-    <section class="card macro-card" id="macro-card" data-default-col="17" data-default-span="8">
-      <div class="card-head"><h2>Macro Calendar</h2><div class="card-actions"><span class="footer-note">Crypto impact</span></div></div>
+    <section class="card macro-card completed-macro-card" id="completed-macro-card" data-default-col="1" data-default-span="12">
+      <div class="card-head"><h2>Completed Macro Events</h2><div class="card-actions"><span class="footer-note">Crypto impact</span></div></div>
       <div class="card-body">
         <div class="calendar-toolbar">
-          <select id="macro-calendar-month-filter" aria-label="Macro calendar month"><option value="">All months</option></select>
-          <select id="macro-calendar-year-filter" aria-label="Macro calendar year"><option value="">All years</option></select>
-          <select id="macro-calendar-event-filter" aria-label="Macro calendar event"><option value="">All events</option></select>
+          <select id="completed-macro-month-filter" aria-label="Completed macro month"><option value="">All months</option></select>
+          <select id="completed-macro-year-filter" aria-label="Completed macro year"><option value="">All years</option></select>
+          <select id="completed-macro-event-filter" aria-label="Completed macro event"><option value="">All events</option></select>
         </div>
-        <div class="calendar-list" id="macro-calendar"></div>
+        <div class="calendar-list" id="completed-macro-calendar"></div>
         <div class="pager calendar-pager">
           <div class="pager-controls">
-            <button class="btn" id="macro-calendar-first-btn" type="button">First</button>
-            <button class="btn" id="macro-calendar-prev-btn" type="button">Prev</button>
-            <button class="btn" id="macro-calendar-next-btn" type="button">Next</button>
-            <button class="btn" id="macro-calendar-last-btn" type="button">Last</button>
+            <button class="btn" id="completed-macro-first-btn" type="button">First</button>
+            <button class="btn" id="completed-macro-prev-btn" type="button">Prev</button>
+            <button class="btn" id="completed-macro-next-btn" type="button">Next</button>
+            <button class="btn" id="completed-macro-last-btn" type="button">Last</button>
           </div>
-          <div class="page-indicator" id="macro-calendar-page-indicator">Page 1 / 1</div>
+          <div class="page-indicator" id="completed-macro-page-indicator">Page 1 / 1</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="card macro-card upcoming-macro-card" id="upcoming-macro-card" data-default-col="13" data-default-span="12">
+      <div class="card-head"><h2>Upcoming Macro Events</h2><div class="card-actions"><span class="footer-note">Crypto impact</span></div></div>
+      <div class="card-body">
+        <div class="calendar-toolbar">
+          <select id="upcoming-macro-month-filter" aria-label="Upcoming macro month"><option value="">All months</option></select>
+          <select id="upcoming-macro-year-filter" aria-label="Upcoming macro year"><option value="">All years</option></select>
+          <select id="upcoming-macro-event-filter" aria-label="Upcoming macro event"><option value="">All events</option></select>
+        </div>
+        <div class="calendar-list" id="upcoming-macro-calendar"></div>
+        <div class="pager calendar-pager">
+          <div class="pager-controls">
+            <button class="btn" id="upcoming-macro-first-btn" type="button">First</button>
+            <button class="btn" id="upcoming-macro-prev-btn" type="button">Prev</button>
+            <button class="btn" id="upcoming-macro-next-btn" type="button">Next</button>
+            <button class="btn" id="upcoming-macro-last-btn" type="button">Last</button>
+          </div>
+          <div class="page-indicator" id="upcoming-macro-page-indicator">Page 1 / 1</div>
         </div>
       </div>
     </section>
@@ -378,11 +399,8 @@ HTML = r'''<!doctype html>
 
     <section class="card config-card" id="config-card" data-default-col="13" data-default-span="12">
       <div class="card-head"><h2>Bot Configuration</h2><div class="card-actions"><span class="drag-hint">editable</span></div></div>
-      <div class="card-body">
-        <div class="config-grid" id="config-form-grid"></div>
-        <div class="config-actions">
-          <button class="btn" id="config-save-btn" type="button">Save configuration</button>
-        </div>
+      <div class="card-body config-launcher">
+        <button class="btn" id="config-open-btn" type="button">Open Bot Configuration</button>
       </div>
     </section>
 
@@ -414,7 +432,21 @@ HTML = r'''<!doctype html>
     </section>
   </div>
 </div>
-<script src="/static/dashboard.v1.js?v=13"></script>
+<div class="modal-backdrop" id="config-modal" hidden>
+  <div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="config-modal-title">
+    <div class="modal-head">
+      <h2 id="config-modal-title">Bot Configuration</h2>
+      <button class="btn" id="config-close-btn" type="button">Close</button>
+    </div>
+    <div class="modal-body">
+      <div class="config-grid" id="config-form-grid"></div>
+      <div class="config-actions">
+        <button class="btn" id="config-save-btn" type="button">Save configuration</button>
+      </div>
+    </div>
+  </div>
+</div>
+<script src="/static/dashboard.v1.js?v=14"></script>
 </body>
 </html>'''
 
@@ -1694,10 +1726,30 @@ def _macro_calendar_page(
     return rows_source[start:start + page_size], total_pages, page, total_events
 
 
-def _render_macro_calendar(now: datetime | None = None) -> str:
+def _macro_calendar_status_page(
+    events: list[dict],
+    status: str,
+    page: int = 0,
+    page_size: int = MACRO_CALENDAR_PAGE_SIZE,
+) -> tuple[list[dict], int, int, int]:
+    status_label = "Completed" if status == "Completed" else "Upcoming"
+    rows_source = sorted(
+        [event for event in events if event.get("status") == status_label],
+        key=lambda event: float(event.get("sortTs") or 0),
+        reverse=status_label == "Completed",
+    )
+    total_events = len(rows_source)
+    total_pages = max(1, math.ceil(total_events / page_size))
+    page = max(0, min(total_pages - 1, int(page or 0)))
+    start = page * page_size
+    return rows_source[start:start + page_size], total_pages, page, total_events
+
+
+def _render_macro_calendar(status: str, now: datetime | None = None) -> str:
     rows = []
-    page_rows, _total_pages, page, _total_events = _macro_calendar_page(
-        _macro_calendar_events(now)
+    page_rows, _total_pages, page, _total_events = _macro_calendar_status_page(
+        _macro_calendar_events(now),
+        status,
     )
     for idx, event in enumerate(page_rows, start=(page * MACRO_CALENDAR_PAGE_SIZE) + 1):
         status = str(event["status"])
@@ -1840,7 +1892,8 @@ def render_initial_dashboard_html(interval_override: str | None = None) -> str:
     news_html = _render_server_news(intelligence)
     signal_html = _render_server_signals(intelligence)
     final_regime = intelligence.get("finalRegime") or {}
-    calendar_html = _render_macro_calendar()
+    completed_calendar_html = _render_macro_calendar("Completed")
+    upcoming_calendar_html = _render_macro_calendar("Upcoming")
     status_html = "".join(
         f'<div class="kv"><div class="k">{label}</div><div class="v">{html_lib.escape(str(value))}</div></div>'
         for label, value in [
@@ -1882,7 +1935,8 @@ def render_initial_dashboard_html(interval_override: str | None = None) -> str:
         'id="regime-updated">live</span>': f'id="regime-updated">AI refresh {html_lib.escape(str(generated)[11:16] or "now")}</span>',
         'id="final-regime-title">Range Consolidation</div>': f'id="final-regime-title">{final_title}</div>',
         'id="final-regime-copy">Choppy price action within established range. Maintain grid discipline and capital efficiency.</div>': f'id="final-regime-copy">{final_copy}</div>',
-        'id="macro-calendar"></div>': f'id="macro-calendar">{calendar_html}</div>',
+        'id="completed-macro-calendar"></div>': f'id="completed-macro-calendar">{completed_calendar_html}</div>',
+        'id="upcoming-macro-calendar"></div>': f'id="upcoming-macro-calendar">{upcoming_calendar_html}</div>',
         'id="status-list"></div>': f'id="status-list">{status_html}</div>',
     }
     for old, new in replacements.items():

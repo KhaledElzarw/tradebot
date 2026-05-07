@@ -121,11 +121,11 @@
     .chart-card { grid-column: span 16; min-height:520px; }
     .intelligence-card { grid-column: span 8; min-height:520px; }
     .regime-card { grid-column: span 16; min-height:350px; }
-    .macro-card { grid-column: span 8; min-height:620px; }
+    .macro-card { grid-column: span 12; min-height:620px; }
     .events-card { grid-column: span 12; min-height:320px; }
     .ai-decisions-card { grid-column: span 24; min-height:420px; }
     .orders-card { grid-column: span 24; min-height:360px; }
-    .config-card { grid-column: span 24; min-height:360px; }
+    .config-card { grid-column: span 12; min-height:180px; }
     .status-footer { grid-column: span 24; min-height:140px; }
     .command-strip { display:grid; grid-template-columns: 1.35fr repeat(4, 1fr); gap:0; border:1px solid var(--line); border-radius:10px; overflow:hidden; background:var(--panel-3); }
     .trading-state-main, .metric { padding:16px 18px; min-height:92px; border-right:1px solid var(--line); background:transparent; border-radius:0; }
@@ -302,6 +302,22 @@
     }
     body.light .config-field input, body.light .config-field select { background:#fff; }
     .config-actions { display:flex; justify-content:flex-end; gap:10px; }
+    .config-launcher { justify-content:center; align-items:flex-start; }
+    .config-launcher .btn { min-width:220px; }
+    .modal-backdrop {
+      position:fixed; inset:0; z-index:80; display:grid; place-items:center; padding:20px;
+      background:rgba(23,23,19,.36); backdrop-filter:blur(8px);
+    }
+    .modal-backdrop[hidden] { display:none; }
+    .modal-panel {
+      width:min(1100px, 100%); max-height:min(86vh, 900px); overflow:auto;
+      background:var(--panel); color:var(--text); border:1px solid var(--line);
+      border-radius:10px; box-shadow:0 28px 80px rgba(0,0,0,.28); padding:16px;
+    }
+    .modal-head { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:14px; }
+    .modal-head h2 { margin:0; font-size:1.1rem; }
+    .modal-body { display:flex; flex-direction:column; gap:12px; }
+    body.modal-open { overflow:hidden; }
     .footer-note { color:var(--muted); font-size:.82rem; }
     .boot-error {
       display:none; margin-bottom:12px; border:1px solid rgba(213,69,69,.35); background:rgba(213,69,69,.08);

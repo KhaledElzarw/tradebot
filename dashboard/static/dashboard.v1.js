@@ -10,10 +10,15 @@ const GRID_MODE_LABELS = { scalpy: 'Scalpy', fatty: 'Fatty', ai_optimized: 'Opti
 const LEGACY_OPTIMIZED_MODES = new Set(['flexy', 'ai_optimized']);
 const SERVER_TIME_ZONE = 'Asia/Dubai';
 const GST_OFFSET_MS = 4 * 60 * 60 * 1000;
+const NEWS_CARD_LIMIT = 10;
 const MACRO_CALENDAR_PAGE_SIZE = 10;
 const MACRO_CALENDAR_SIDE_SIZE = 5;
 const MACRO_CALENDAR_LOOKBACK_MONTHS = 12;
 const MACRO_CALENDAR_LOOKAHEAD_MONTHS = 12;
+const MACRO_CALENDAR_KINDS = {
+  completed: { prefix: 'completed-macro', status: 'Completed', empty: 'No completed macro events match the filters' },
+  upcoming: { prefix: 'upcoming-macro', status: 'Upcoming', empty: 'No upcoming macro events match the filters' },
+};
 const MACRO_CALENDAR_TEMPLATES = [
   ['Asia Liquidity Open', 8, 0, 2, '#1767c2', 'Watch Asia liquidity, early dollar tone, and grid spread pressure.', 'Asia session set the initial liquidity tone for BTC spread and inventory risk.'],
   ['Europe Macro / Yields Check', 12, 0, 2, '#f7931a', 'Watch EUR/US yields and risk appetite before the US data window.', 'Europe macro flow updated rate-pressure context for the active grid.'],
@@ -72,10 +77,10 @@ const stateUi = {
   lastEvents: [],
   lastAiDecisions: [],
   aiDecisionPage: 0,
-  macroCalendarPage: 0,
-  macroCalendarMonthFilter: '',
-  macroCalendarYearFilter: '',
-  macroCalendarEventFilter: '',
+  macroCalendars: {
+    completed: { page: 0, monthFilter: '', yearFilter: '', eventFilter: '' },
+    upcoming: { page: 0, monthFilter: '', yearFilter: '', eventFilter: '' },
+  },
   lastMacroCalendarServerTime: null,
   activeAgentRole: '',
   activeAgentDecisionId: '',
@@ -156,16 +161,19 @@ bindClickIfPresent('ai-decisions-first-btn', () => changeAiDecisionPage('first')
 bindClickIfPresent('ai-decisions-prev-btn', () => changeAiDecisionPage('prev'));
 bindClickIfPresent('ai-decisions-next-btn', () => changeAiDecisionPage('next'));
 bindClickIfPresent('ai-decisions-last-btn', () => changeAiDecisionPage('last'));
-bindClickIfPresent('macro-calendar-first-btn', () => changeMacroCalendarPage('first'));
-bindClickIfPresent('macro-calendar-prev-btn', () => changeMacroCalendarPage('prev'));
-bindClickIfPresent('macro-calendar-next-btn', () => changeMacroCalendarPage('next'));
-bindClickIfPresent('macro-calendar-last-btn', () => changeMacroCalendarPage('last'));
-const macroCalendarMonthFilter = document.getElementById('macro-calendar-month-filter');
-if (macroCalendarMonthFilter) macroCalendarMonthFilter.addEventListener('change', () => setMacroCalendarFilter('month', macroCalendarMonthFilter.value));
-const macroCalendarYearFilter = document.getElementById('macro-calendar-year-filter');
-if (macroCalendarYearFilter) macroCalendarYearFilter.addEventListener('change', () => setMacroCalendarFilter('year', macroCalendarYearFilter.value));
-const macroCalendarEventFilter = document.getElementById('macro-calendar-event-filter');
-if (macroCalendarEventFilter) macroCalendarEventFilter.addEventListener('change', () => setMacroCalendarFilter('event', macroCalendarEventFilter.value));
+Object.keys(MACRO_CALENDAR_KINDS).forEach(kind => {
+  const prefix = MACRO_CALENDAR_KINDS[kind].prefix;
+  bindClickIfPresent(`${prefix}-first-btn`, () => changeMacroCalendarPage(kind, 'first'));
+  bindClickIfPresent(`${prefix}-prev-btn`, () => changeMacroCalendarPage(kind, 'prev'));
+  bindClickIfPresent(`${prefix}-next-btn`, () => changeMacroCalendarPage(kind, 'next'));
+  bindClickIfPresent(`${prefix}-last-btn`, () => changeMacroCalendarPage(kind, 'last'));
+  const monthFilter = document.getElementById(`${prefix}-month-filter`);
+  if (monthFilter) monthFilter.addEventListener('change', () => setMacroCalendarFilter(kind, 'month', monthFilter.value));
+  const yearFilter = document.getElementById(`${prefix}-year-filter`);
+  if (yearFilter) yearFilter.addEventListener('change', () => setMacroCalendarFilter(kind, 'year', yearFilter.value));
+  const eventFilter = document.getElementById(`${prefix}-event-filter`);
+  if (eventFilter) eventFilter.addEventListener('change', () => setMacroCalendarFilter(kind, 'event', eventFilter.value));
+});
 bindClickIfPresent('agent-configure-btn', () => renderAgentChatNotice('Agent configuration is not enabled in this read-only recovery.'));
 bindClickIfPresent('agent-chat-send-btn', () => renderAgentChatNotice('Agent chat is not enabled in this read-only recovery.'));
 const agentSelect = document.getElementById('agent-select');
@@ -182,7 +190,18 @@ document.getElementById('orders-first-btn').addEventListener('click', () => chan
 document.getElementById('orders-prev-btn').addEventListener('click', () => changeOrderPage('prev'));
 document.getElementById('orders-next-btn').addEventListener('click', () => changeOrderPage('next'));
 document.getElementById('orders-last-btn').addEventListener('click', () => changeOrderPage('last'));
-document.getElementById('config-save-btn').addEventListener('click', saveConfig);
+bindClickIfPresent('config-open-btn', openConfigModal);
+bindClickIfPresent('config-close-btn', closeConfigModal);
+bindClickIfPresent('config-save-btn', saveConfig);
+const configModal = document.getElementById('config-modal');
+if (configModal) {
+  configModal.addEventListener('click', ev => {
+    if (ev.target === configModal) closeConfigModal();
+  });
+}
+document.addEventListener('keydown', ev => {
+  if (ev.key === 'Escape') closeConfigModal();
+});
 
 function fmtNum(v, digits = 2) { if (v === null || v === undefined || Number.isNaN(Number(v))) return '--'; return Number(v).toLocaleString(undefined, { maximumFractionDigits: digits, minimumFractionDigits: digits }); }
 function fmtMoney(v) { return v === null || v === undefined ? '--' : `$${fmtNum(v, 2)}`; }
@@ -265,7 +284,7 @@ function acceptPayloadSeq(channel, seq, instanceId = null) {
   stateUi.lastSeq[key] = next;
   return true;
 }
-function getLayoutKey() { return 'tradebot-layout-v7'; }
+function getLayoutKey() { return 'tradebot-layout-v8'; }
 function gridModeLabel(mode) { return GRID_MODE_LABELS[mode] || mode; }
 function dashboardModeKey(state) {
   const mode = String((state && state.gridMode) || '').trim().toLowerCase();
@@ -916,7 +935,6 @@ function renderLiveStatusFooter(status, state, runtime, data, grid) {
     ['AI action', ai.riskAction || '--', '', getChanged('status.aiAction', ai.riskAction)],
     ['AI confidence', ai.confidence != null ? fmtPct(Number(ai.confidence)) : '--', '', getChanged('status.aiConfidence', ai.confidence)],
     ['AI mode', aiMode || '--', '', getChanged('status.aiMode', aiMode)],
-    ['AI decision', ai.decisionId || '--', '', getChanged('status.aiDecision', ai.decisionId)],
   ]);
 }
 
@@ -942,7 +960,7 @@ function normalizedNewsCards(intelligence) {
     .forEach(item => {
       const title = String(item.title || 'Crypto market update').trim();
       const key = title.toLowerCase();
-      if (cards.length < 5 && key && !seen.has(key)) {
+      if (cards.length < NEWS_CARD_LIMIT && key && !seen.has(key)) {
         const sentiment = newsSentiment(title);
         cards.push({
           title,
@@ -955,7 +973,7 @@ function normalizedNewsCards(intelligence) {
         seen.add(key);
       }
     });
-  while (cards.length < 5) {
+  while (cards.length < NEWS_CARD_LIMIT) {
     cards.push({
       title: 'Awaiting fresh crypto headlines',
       source: 'Local',
@@ -965,7 +983,7 @@ function normalizedNewsCards(intelligence) {
       url: '',
     });
   }
-  return cards.slice(0, 5);
+  return cards.slice(0, NEWS_CARD_LIMIT);
 }
 
 function renderIntelligence(status, cumulative, runtime, intelligence) {
@@ -1041,6 +1059,16 @@ function renderIntelligence(status, cumulative, runtime, intelligence) {
       impact: 4,
     },
   ];
+  while (cards.length < NEWS_CARD_LIMIT) {
+    cards.push({
+      title: 'Awaiting fresh crypto headlines',
+      source: 'Local',
+      age: '30m refresh',
+      sentiment: 'Neutral',
+      color: 'orange',
+      impact: 3,
+    });
+  }
   document.getElementById('news-stack').innerHTML = cards.map(card => `
     <div class="news-card">
       <div class="news-title">${card.title}</div>
@@ -1186,38 +1214,35 @@ function macroCalendarEvents(serverTimeUtc) {
   return events;
 }
 
-function filteredMacroCalendarEvents(events) {
+function macroCalendarState(kind) {
+  const key = MACRO_CALENDAR_KINDS[kind] ? kind : 'completed';
+  if (!stateUi.macroCalendars[key]) {
+    stateUi.macroCalendars[key] = { page: 0, monthFilter: '', yearFilter: '', eventFilter: '' };
+  }
+  return stateUi.macroCalendars[key];
+}
+
+function filteredMacroCalendarEvents(events, kind = 'completed') {
+  const calendarKind = MACRO_CALENDAR_KINDS[kind] ? kind : 'completed';
+  const calendar = macroCalendarState(calendarKind);
   return (events || []).filter(ev => {
-    const monthOk = !stateUi.macroCalendarMonthFilter || String(ev.month) === String(stateUi.macroCalendarMonthFilter);
-    const yearOk = !stateUi.macroCalendarYearFilter || String(ev.year) === String(stateUi.macroCalendarYearFilter);
-    const eventOk = !stateUi.macroCalendarEventFilter || ev.title === stateUi.macroCalendarEventFilter;
-    return monthOk && yearOk && eventOk;
+    const monthOk = !calendar.monthFilter || String(ev.month) === String(calendar.monthFilter);
+    const yearOk = !calendar.yearFilter || String(ev.year) === String(calendar.yearFilter);
+    const eventOk = !calendar.eventFilter || ev.title === calendar.eventFilter;
+    const statusOk = ev.status === MACRO_CALENDAR_KINDS[calendarKind].status;
+    return monthOk && yearOk && eventOk && statusOk;
   });
 }
 
-function macroCalendarPageRows(events, page = stateUi.macroCalendarPage) {
-  const completed = (events || [])
-    .filter(ev => ev.status === 'Completed')
-    .sort((a, b) => Number(b.sortTs || 0) - Number(a.sortTs || 0));
-  const upcoming = (events || [])
-    .filter(ev => ev.status === 'Upcoming')
-    .sort((a, b) => Number(a.sortTs || 0) - Number(b.sortTs || 0));
-  if (completed.length && upcoming.length) {
-    const pages = Math.max(
-      1,
-      Math.ceil(completed.length / MACRO_CALENDAR_SIDE_SIZE),
-      Math.ceil(upcoming.length / MACRO_CALENDAR_SIDE_SIZE),
-    );
-    const pageIndex = Math.max(0, Math.min(pages - 1, Number(page || 0)));
-    const start = pageIndex * MACRO_CALENDAR_SIDE_SIZE;
-    return {
-      rows: completed.slice(start, start + MACRO_CALENDAR_SIDE_SIZE).concat(upcoming.slice(start, start + MACRO_CALENDAR_SIDE_SIZE)),
-      totalPages: pages,
-      page: pageIndex,
-      totalEvents: completed.length + upcoming.length,
-    };
-  }
-  const rowsSource = completed.length ? completed : upcoming;
+function macroCalendarPageRows(events, kind = 'completed', page = macroCalendarState(kind).page) {
+  const status = MACRO_CALENDAR_KINDS[kind] ? MACRO_CALENDAR_KINDS[kind].status : 'Completed';
+  const rowsSource = (events || [])
+    .filter(ev => ev.status === status)
+    .sort((a, b) => {
+      const left = Number(a.sortTs || 0);
+      const right = Number(b.sortTs || 0);
+      return status === 'Completed' ? right - left : left - right;
+    });
   const pages = Math.max(1, Math.ceil(rowsSource.length / MACRO_CALENDAR_PAGE_SIZE));
   const pageIndex = Math.max(0, Math.min(pages - 1, Number(page || 0)));
   const start = pageIndex * MACRO_CALENDAR_PAGE_SIZE;
@@ -1238,7 +1263,9 @@ function setSelectOptions(selectId, options, selectedValue, emptyLabel) {
   ].join('');
 }
 
-function populateMacroCalendarFilters(events) {
+function populateMacroCalendarFilters(kind, events) {
+  const calendar = macroCalendarState(kind);
+  const prefix = MACRO_CALENDAR_KINDS[kind].prefix;
   const months = Array.from(new Map((events || []).map(ev => [String(ev.month), {
     value: String(ev.month),
     label: ev.monthName || String(ev.month),
@@ -1247,67 +1274,80 @@ function populateMacroCalendarFilters(events) {
     .map(year => ({ value: String(year), label: String(year) }));
   const eventTypes = Array.from(new Set((events || []).map(ev => ev.title))).sort()
     .map(title => ({ value: title, label: title }));
-  setSelectOptions('macro-calendar-month-filter', months, stateUi.macroCalendarMonthFilter, 'All months');
-  setSelectOptions('macro-calendar-year-filter', years, stateUi.macroCalendarYearFilter, 'All years');
-  setSelectOptions('macro-calendar-event-filter', eventTypes, stateUi.macroCalendarEventFilter, 'All events');
+  setSelectOptions(`${prefix}-month-filter`, months, calendar.monthFilter, 'All months');
+  setSelectOptions(`${prefix}-year-filter`, years, calendar.yearFilter, 'All years');
+  setSelectOptions(`${prefix}-event-filter`, eventTypes, calendar.eventFilter, 'All events');
 }
 
-function setMacroCalendarFilter(kind, value) {
-  if (kind === 'month') stateUi.macroCalendarMonthFilter = value || '';
-  if (kind === 'year') stateUi.macroCalendarYearFilter = value || '';
-  if (kind === 'event') stateUi.macroCalendarEventFilter = value || '';
-  stateUi.macroCalendarPage = 0;
+function setMacroCalendarFilter(calendarKind, filterKind, value) {
+  const calendar = macroCalendarState(calendarKind);
+  if (filterKind === 'month') calendar.monthFilter = value || '';
+  if (filterKind === 'year') calendar.yearFilter = value || '';
+  if (filterKind === 'event') calendar.eventFilter = value || '';
+  calendar.page = 0;
   renderMacroCalendar(stateUi.lastMacroCalendarServerTime);
 }
 
-function renderMacroCalendarPager(totalPages, totalEvents) {
-  setTextIfPresent('macro-calendar-page-indicator', `Page ${stateUi.macroCalendarPage + 1} / ${totalPages} • ${totalEvents} events`);
+function renderMacroCalendarPager(kind, totalPages, totalEvents) {
+  const prefix = MACRO_CALENDAR_KINDS[kind].prefix;
+  const calendar = macroCalendarState(kind);
+  setTextIfPresent(`${prefix}-page-indicator`, `Page ${calendar.page + 1} / ${totalPages} • ${totalEvents} events`);
   ['first', 'prev'].forEach(name => {
-    const btn = document.getElementById(`macro-calendar-${name}-btn`);
-    if (btn) btn.disabled = stateUi.macroCalendarPage <= 0;
+    const btn = document.getElementById(`${prefix}-${name}-btn`);
+    if (btn) btn.disabled = calendar.page <= 0;
   });
   ['next', 'last'].forEach(name => {
-    const btn = document.getElementById(`macro-calendar-${name}-btn`);
-    if (btn) btn.disabled = stateUi.macroCalendarPage >= totalPages - 1;
+    const btn = document.getElementById(`${prefix}-${name}-btn`);
+    if (btn) btn.disabled = calendar.page >= totalPages - 1;
   });
 }
 
-function changeMacroCalendarPage(direction) {
-  const page = macroCalendarPageRows(filteredMacroCalendarEvents(macroCalendarEvents(stateUi.lastMacroCalendarServerTime))).totalPages;
-  if (direction === 'first') stateUi.macroCalendarPage = 0;
-  if (direction === 'last') stateUi.macroCalendarPage = page - 1;
-  if (direction === 'prev') stateUi.macroCalendarPage = Math.max(0, Number(stateUi.macroCalendarPage || 0) - 1);
-  if (direction === 'next') stateUi.macroCalendarPage = Math.min(page - 1, Number(stateUi.macroCalendarPage || 0) + 1);
+function changeMacroCalendarPage(kind, direction) {
+  const calendarKind = MACRO_CALENDAR_KINDS[kind] ? kind : 'completed';
+  const calendar = macroCalendarState(calendarKind);
+  const pages = macroCalendarPageRows(
+    filteredMacroCalendarEvents(macroCalendarEvents(stateUi.lastMacroCalendarServerTime), calendarKind),
+    calendarKind,
+  ).totalPages;
+  if (direction === 'first') calendar.page = 0;
+  if (direction === 'last') calendar.page = pages - 1;
+  if (direction === 'prev') calendar.page = Math.max(0, Number(calendar.page || 0) - 1);
+  if (direction === 'next') calendar.page = Math.min(pages - 1, Number(calendar.page || 0) + 1);
   renderMacroCalendar(stateUi.lastMacroCalendarServerTime);
 }
 
 function renderMacroCalendar(serverTimeUtc) {
-  const target = document.getElementById('macro-calendar');
-  if (!target) return;
   stateUi.lastMacroCalendarServerTime = serverTimeUtc || stateUi.lastMacroCalendarServerTime || new Date().toISOString();
   const events = macroCalendarEvents(stateUi.lastMacroCalendarServerTime);
-  populateMacroCalendarFilters(events);
-  const filtered = filteredMacroCalendarEvents(events);
-  const pageData = macroCalendarPageRows(filtered);
-  stateUi.macroCalendarPage = pageData.page;
-  if (!pageData.rows.length) {
-    target.innerHTML = '<div class="calendar-empty">No macro events match the filters</div>';
-    renderMacroCalendarPager(1, 0);
-    return;
-  }
-  target.innerHTML = pageData.rows.map((ev, idx) => `
-    <div class="calendar-row ${ev.status.toLowerCase()}">
-      <div class="calendar-icon" style="background:${ev.color}">${(pageData.page * MACRO_CALENDAR_PAGE_SIZE) + idx + 1}</div>
-      <div class="calendar-main">
-        <strong>${escapeHtml(ev.title)}</strong>
-        <div class="calendar-summary">${escapeHtml(ev.status)} - ${escapeHtml(ev.summary)}</div>
+  Object.keys(MACRO_CALENDAR_KINDS).forEach(kind => {
+    const prefix = MACRO_CALENDAR_KINDS[kind].prefix;
+    const target = document.getElementById(`${prefix}-calendar`);
+    if (!target) return;
+    const kindEvents = events.filter(ev => ev.status === MACRO_CALENDAR_KINDS[kind].status);
+    populateMacroCalendarFilters(kind, kindEvents);
+    const filtered = filteredMacroCalendarEvents(kindEvents, kind);
+    const pageData = macroCalendarPageRows(filtered, kind);
+    const calendar = macroCalendarState(kind);
+    calendar.page = pageData.page;
+    if (!pageData.rows.length) {
+      target.innerHTML = `<div class="calendar-empty">${escapeHtml(MACRO_CALENDAR_KINDS[kind].empty)}</div>`;
+      renderMacroCalendarPager(kind, 1, 0);
+      return;
+    }
+    target.innerHTML = pageData.rows.map((ev, idx) => `
+      <div class="calendar-row ${ev.status.toLowerCase()}">
+        <div class="calendar-icon" style="background:${ev.color}">${(pageData.page * MACRO_CALENDAR_PAGE_SIZE) + idx + 1}</div>
+        <div class="calendar-main">
+          <strong>${escapeHtml(ev.title)}</strong>
+          <div class="calendar-summary">${escapeHtml(ev.status)} - ${escapeHtml(ev.summary)}</div>
+        </div>
+        <span class="calendar-meta">${escapeHtml(ev.date)}<br>${escapeHtml(ev.time)}</span>
+        <span class="status-chip ${ev.status === 'Completed' ? 'good' : 'warn'}">${escapeHtml(ev.status)}</span>
+        <div class="calendar-impact"><div class="calendar-meta" style="margin-bottom:5px">Impact</div><div class="impact-dots">${Array.from({ length: 3 }, (_, i) => `<span class="${i < ev.impact ? 'on' : ''}"></span>`).join('')}</div></div>
       </div>
-      <span class="calendar-meta">${escapeHtml(ev.date)}<br>${escapeHtml(ev.time)}</span>
-      <span class="status-chip ${ev.status === 'Completed' ? 'good' : 'warn'}">${escapeHtml(ev.status)}</span>
-      <div class="calendar-impact"><div class="calendar-meta" style="margin-bottom:5px">Impact</div><div class="impact-dots">${Array.from({ length: 3 }, (_, i) => `<span class="${i < ev.impact ? 'on' : ''}"></span>`).join('')}</div></div>
-    </div>
-  `).join('');
-  renderMacroCalendarPager(pageData.totalPages, pageData.totalEvents);
+    `).join('');
+    renderMacroCalendarPager(kind, pageData.totalPages, pageData.totalEvents);
+  });
 }
 
 function getVisibleOhlcv(allOhlcv) {
@@ -1987,6 +2027,7 @@ function renderTimeframeControls() {
 
 function populateConfigForm(state, modelOptions = []) {
   const grid = document.getElementById('config-form-grid');
+  if (!grid) return;
   const endpointKey = endpointKeyForState(state);
   grid.innerHTML = CONFIG_FIELDS.map(field => {
     const rawValue = field.key === 'aiEndpointKey' ? endpointKey : state[field.key];
@@ -2048,6 +2089,20 @@ function wireAiEndpointControls(modelOptions = []) {
       AI_MODEL_FIELDS.forEach(key => setModelSelectOptions(document.getElementById(`cfg-${key}`), models));
     });
   }
+}
+
+function openConfigModal() {
+  const modal = document.getElementById('config-modal');
+  if (!modal) return;
+  modal.hidden = false;
+  if (document.body && document.body.classList) document.body.classList.add('modal-open');
+}
+
+function closeConfigModal() {
+  const modal = document.getElementById('config-modal');
+  if (!modal) return;
+  modal.hidden = true;
+  if (document.body && document.body.classList) document.body.classList.remove('modal-open');
 }
 
 function dashboardToken() {

@@ -140,8 +140,8 @@ def test_root_dashboard_route_returns_html_shell(monkeypatch):
     html = body.decode("utf-8")
     assert status == 200
     assert headers["Content-Type"].startswith("text/html")
-    assert '<script src="/static/dashboard.v1.js?v=13"></script>' in html
-    assert 'href="/static/dashboard.v1.css?v=13"' in html
+    assert '<script src="/static/dashboard.v1.js?v=14"></script>' in html
+    assert 'href="/static/dashboard.v1.css?v=14"' in html
     assert "Server Time" in html
     assert "May 1 2026 UTC" not in html
     assert "BTCUSDT" in html
@@ -162,15 +162,32 @@ def test_root_dashboard_route_returns_html_shell(monkeypatch):
         "hover-ohlcv",
         "news-stack",
         "signal-table",
-        "macro-calendar",
-        "macro-calendar-month-filter",
-        "macro-calendar-year-filter",
-        "macro-calendar-event-filter",
-        "macro-calendar-first-btn",
-        "macro-calendar-prev-btn",
-        "macro-calendar-next-btn",
-        "macro-calendar-last-btn",
-        "macro-calendar-page-indicator",
+        "completed-macro-card",
+        "completed-macro-calendar",
+        "completed-macro-month-filter",
+        "completed-macro-year-filter",
+        "completed-macro-event-filter",
+        "completed-macro-first-btn",
+        "completed-macro-prev-btn",
+        "completed-macro-next-btn",
+        "completed-macro-last-btn",
+        "completed-macro-page-indicator",
+        "upcoming-macro-card",
+        "upcoming-macro-calendar",
+        "upcoming-macro-month-filter",
+        "upcoming-macro-year-filter",
+        "upcoming-macro-event-filter",
+        "upcoming-macro-first-btn",
+        "upcoming-macro-prev-btn",
+        "upcoming-macro-next-btn",
+        "upcoming-macro-last-btn",
+        "upcoming-macro-page-indicator",
+        "config-open-btn",
+        "config-modal",
+        "config-modal-title",
+        "config-close-btn",
+        "config-form-grid",
+        "config-save-btn",
         "ai-decisions-card",
         "ai-decisions-body",
         "ai-decisions-page-indicator",
@@ -200,7 +217,7 @@ def test_static_route_serves_dashboard_js_asset(monkeypatch, tmp_path):
 
     server = _start_server()
     try:
-        status, headers, body = _request(server, "/static/dashboard.v1.js?v=13")
+        status, headers, body = _request(server, "/static/dashboard.v1.js?v=14")
     finally:
         server.shutdown()
         server.server_close()

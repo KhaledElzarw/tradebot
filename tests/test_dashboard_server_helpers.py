@@ -355,9 +355,7 @@ def test_fallback_intelligence_pads_cards_and_scores_sentiment():
     assert [card["sentiment"] for card in payload["newsCards"]] == [
         "Bullish",
         "Bearish",
-        "Neutral",
-        "Neutral",
-        "Neutral",
+        *["Neutral"] * 8,
     ]
     assert payload["newsCards"][0]["impact"] == 6
     assert payload["source"] == "deterministic_fallback"
@@ -427,13 +425,39 @@ def test_gst_server_time_and_macro_calendar_update_daily():
     assert empty_page == 0
     assert empty_total == 0
 
-    html = dashboard_server._render_macro_calendar(
+    completed_rows, completed_pages, completed_page, completed_total = dashboard_server._macro_calendar_status_page(
+        events,
+        "Completed",
+    )
+    upcoming_rows, upcoming_pages, upcoming_page, upcoming_total = dashboard_server._macro_calendar_status_page(
+        events,
+        "Upcoming",
+    )
+    assert completed_page == 0
+    assert upcoming_page == 0
+    assert completed_pages > 150
+    assert upcoming_pages > 150
+    assert completed_total + upcoming_total == len(events)
+    assert len(completed_rows) == 10
+    assert len(upcoming_rows) == 10
+    assert {event["status"] for event in completed_rows} == {"Completed"}
+    assert {event["status"] for event in upcoming_rows} == {"Upcoming"}
+    assert completed_rows[0]["sortTs"] > completed_rows[1]["sortTs"]
+    assert upcoming_rows[0]["sortTs"] < upcoming_rows[1]["sortTs"]
+
+    completed_html = dashboard_server._render_macro_calendar(
+        "Completed",
         datetime(2026, 5, 7, 13, 0, 0, tzinfo=timezone.utc)
     )
-    assert "US Data Window" in html
-    assert "Completed - US data window passed" in html
-    assert "Upcoming - Watch ETF flow" in html
-    assert html.count('class="calendar-row') == 10
+    upcoming_html = dashboard_server._render_macro_calendar(
+        "Upcoming",
+        datetime(2026, 5, 7, 13, 0, 0, tzinfo=timezone.utc)
+    )
+    assert "US Data Window" in completed_html
+    assert "Completed - US data window passed" in completed_html
+    assert "Upcoming - Watch ETF flow" in upcoming_html
+    assert completed_html.count('class="calendar-row') == 10
+    assert upcoming_html.count('class="calendar-row') == 10
 
 
 def test_format_and_server_render_helpers_cover_empty_and_value_rows():
@@ -508,8 +532,8 @@ def test_format_and_server_render_helpers_cover_empty_and_value_rows():
     assert "Below market 10.00%" in orders_html
     assert impact_html.count("on green") == 3
     assert '<a href="https://example.test/story"' in news_html
-    assert many_news_html.count('class="news-card"') == 5
-    assert raw_padded_news_html.count('class="news-card"') == 5
+    assert many_news_html.count('class="news-card"') == 10
+    assert raw_padded_news_html.count('class="news-card"') == 10
     assert "Bitcoin raw rise" in raw_padded_news_html
     assert "Exchange hack loss" in raw_padded_news_html
     assert "var(--blue)" in signals_html
