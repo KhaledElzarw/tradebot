@@ -226,7 +226,7 @@ HTML = r'''<!doctype html>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Tradebot Live Dashboard</title>
-  <link rel="stylesheet" href="/static/dashboard.v1.css?v=17">
+  <link rel="stylesheet" href="/static/dashboard.v1.css?v=18">
 </head>
 <body>
 <div class="wrap">
@@ -446,7 +446,7 @@ HTML = r'''<!doctype html>
     </div>
   </div>
 </div>
-<script src="/static/dashboard.v1.js?v=17"></script>
+<script src="/static/dashboard.v1.js?v=18"></script>
 </body>
 </html>'''
 
@@ -1746,6 +1746,59 @@ def _macro_calendar_status_page(
     return rows_source[start:start + page_size], total_pages, page, total_events
 
 
+def _macro_calendar_day_groups(rows: list[dict]) -> list[dict]:
+    groups: list[dict] = []
+    for event in rows:
+        key = (event.get("year"), event.get("month"), event.get("day"))
+        if groups and groups[-1]["key"] == key:
+            groups[-1]["events"].append(event)
+        else:
+            groups.append({"key": key, "events": [event]})
+    return groups
+
+
+def _macro_calendar_group_pages(
+    groups: list[dict],
+    page_size: int = MACRO_CALENDAR_PAGE_SIZE,
+) -> list[list[dict]]:
+    pages: list[list[dict]] = []
+    page_groups: list[dict] = []
+    page_count = 0
+    for group in groups:
+        group_size = max(1, len(group.get("events") or []))
+        if page_groups and page_count + group_size > page_size:
+            pages.append(page_groups)
+            page_groups = []
+            page_count = 0
+        page_groups.append(group)
+        page_count += group_size
+    if page_groups:
+        pages.append(page_groups)
+    return pages or [[]]
+
+
+def _macro_calendar_grouped_status_page(
+    events: list[dict],
+    status: str,
+    page: int = 0,
+    page_size: int = MACRO_CALENDAR_PAGE_SIZE,
+) -> tuple[list[dict], int, int, int]:
+    status_label = "Completed" if status == "Completed" else "Upcoming"
+    rows_source = sorted(
+        [event for event in events if event.get("status") == status_label],
+        key=lambda event: float(event.get("sortTs") or 0),
+        reverse=status_label == "Completed",
+    )
+    total_events = len(rows_source)
+    grouped_pages = _macro_calendar_group_pages(
+        _macro_calendar_day_groups(rows_source),
+        page_size,
+    )
+    total_pages = max(1, len(grouped_pages))
+    page = max(0, min(total_pages - 1, int(page or 0)))
+    return grouped_pages[page] if total_events else [], total_pages, page, total_events
+
+
 def _macro_calendar_delta_label(event: dict, current: datetime) -> str:
     event_ts = float(event.get("sortTs") or current.timestamp())
     diff_seconds = event_ts - current.timestamp()
@@ -1786,26 +1839,41 @@ def _render_macro_calendar(status: str, now: datetime | None = None) -> str:
     if current.tzinfo is None:
         current = current.replace(tzinfo=timezone.utc)
     rows = []
-    page_rows, _total_pages, page, _total_events = _macro_calendar_status_page(
+    page_groups, _total_pages, page, _total_events = _macro_calendar_grouped_status_page(
         _macro_calendar_events(current),
         status,
     )
-    for event in page_rows:
-        status = str(event["status"])
-        dots = "".join(
-            f'<span class="{"on" if i < int(event["impact"]) else ""}"></span>'
-            for i in range(3)
-        )
+    for group in page_groups:
+        event_rows = []
+        group_events = group["events"]
+        for event in group_events:
+            event_status = str(event["status"])
+            time_label = str(event.get("time") or "")
+            if event_status == "Upcoming":
+                time_label = f"{time_label} ({_macro_calendar_delta_label(event, current)})"
+            dots = "".join(
+                f'<span class="{"on" if i < int(event["impact"]) else ""}"></span>'
+                for i in range(3)
+            )
+            event_rows.append(
+                f'<div class="calendar-row {event_status.lower()}">'
+                '<div class="calendar-main">'
+                f'<strong>{html_lib.escape(str(event["title"]))}</strong>'
+                f'<div class="calendar-event-time">{html_lib.escape(time_label)}</div>'
+                f'<div class="calendar-summary">{html_lib.escape(event_status)} - {html_lib.escape(str(event["summary"]))}</div>'
+                "</div>"
+                '<div class="calendar-impact">'
+                '<div class="calendar-meta" style="margin-bottom:5px">Impact</div>'
+                f'<div class="impact-dots">{dots}</div>'
+                "</div>"
+                "</div>"
+            )
+        group_status = str(group_events[0]["status"])
         rows.append(
-            f'<div class="calendar-row {status.lower()}">'
-            f'{_render_macro_calendar_badge(event, current)}'
-            '<div class="calendar-main">'
-            f'<strong>{html_lib.escape(str(event["title"]))}</strong>'
-            f'<div class="calendar-summary">{html_lib.escape(status)} - {html_lib.escape(str(event["summary"]))}</div>'
-            "</div>"
-            '<div class="calendar-impact">'
-            '<div class="calendar-meta" style="margin-bottom:5px">Impact</div>'
-            f'<div class="impact-dots">{dots}</div>'
+            f'<div class="calendar-day-group {group_status.lower()}">'
+            f'{_render_macro_calendar_badge(group_events[0], current)}'
+            '<div class="calendar-day-events">'
+            f'{"".join(event_rows)}'
             "</div>"
             "</div>"
         )

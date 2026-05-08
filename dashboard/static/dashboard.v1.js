@@ -1235,20 +1235,79 @@ function filteredMacroCalendarEvents(events, kind = 'completed') {
   });
 }
 
-function macroCalendarPageRows(events, kind = 'completed', page = macroCalendarState(kind).page) {
+function sortedMacroCalendarRows(events, kind = 'completed') {
   const status = MACRO_CALENDAR_KINDS[kind] ? MACRO_CALENDAR_KINDS[kind].status : 'Completed';
-  const rowsSource = (events || [])
+  return (events || [])
     .filter(ev => ev.status === status)
     .sort((a, b) => {
       const left = Number(a.sortTs || 0);
       const right = Number(b.sortTs || 0);
       return status === 'Completed' ? right - left : left - right;
     });
+}
+
+function macroCalendarPageRows(events, kind = 'completed', page = macroCalendarState(kind).page) {
+  const rowsSource = sortedMacroCalendarRows(events, kind);
   const pages = Math.max(1, Math.ceil(rowsSource.length / MACRO_CALENDAR_PAGE_SIZE));
   const pageIndex = Math.max(0, Math.min(pages - 1, Number(page || 0)));
   const start = pageIndex * MACRO_CALENDAR_PAGE_SIZE;
   return {
     rows: rowsSource.slice(start, start + MACRO_CALENDAR_PAGE_SIZE),
+    totalPages: pages,
+    page: pageIndex,
+    totalEvents: rowsSource.length,
+  };
+}
+
+function macroCalendarDayKey(event) {
+  return [
+    event.year || '',
+    String(event.month || '').padStart(2, '0'),
+    String(event.day || '').padStart(2, '0'),
+  ].join('-');
+}
+
+function macroCalendarDayGroups(rows) {
+  const groups = [];
+  (rows || []).forEach(event => {
+    const key = macroCalendarDayKey(event);
+    const lastGroup = groups[groups.length - 1];
+    if (lastGroup && lastGroup.key === key) {
+      lastGroup.events.push(event);
+      return;
+    }
+    groups.push({ key, events: [event] });
+  });
+  return groups;
+}
+
+function macroCalendarGroupPages(groups) {
+  const pages = [];
+  let pageGroups = [];
+  let pageCount = 0;
+  (groups || []).forEach(group => {
+    const groupSize = Math.max(1, (group.events || []).length);
+    if (pageGroups.length && pageCount + groupSize > MACRO_CALENDAR_PAGE_SIZE) {
+      pages.push(pageGroups);
+      pageGroups = [];
+      pageCount = 0;
+    }
+    pageGroups.push(group);
+    pageCount += groupSize;
+  });
+  if (pageGroups.length) pages.push(pageGroups);
+  return pages.length ? pages : [[]];
+}
+
+function macroCalendarGroupedPageRows(events, kind = 'completed', page = macroCalendarState(kind).page) {
+  const rowsSource = sortedMacroCalendarRows(events, kind);
+  const groupPages = macroCalendarGroupPages(macroCalendarDayGroups(rowsSource));
+  const pages = Math.max(1, groupPages.length);
+  const pageIndex = Math.max(0, Math.min(pages - 1, Number(page || 0)));
+  const groups = rowsSource.length ? groupPages[pageIndex] : [];
+  return {
+    groups,
+    rows: groups.flatMap(group => group.events || []),
     totalPages: pages,
     page: pageIndex,
     totalEvents: rowsSource.length,
@@ -1306,7 +1365,7 @@ function renderMacroCalendarPager(kind, totalPages, totalEvents) {
 function changeMacroCalendarPage(kind, direction) {
   const calendarKind = MACRO_CALENDAR_KINDS[kind] ? kind : 'completed';
   const calendar = macroCalendarState(calendarKind);
-  const pages = macroCalendarPageRows(
+  const pages = macroCalendarGroupedPageRows(
     filteredMacroCalendarEvents(macroCalendarEvents(stateUi.lastMacroCalendarServerTime), calendarKind),
     calendarKind,
   ).totalPages;
@@ -1348,6 +1407,12 @@ function macroCalendarBadge(event, nowUtcMs) {
   `;
 }
 
+function macroCalendarEventTime(event, nowUtcMs) {
+  const time = event.time || '';
+  if (event.status !== 'Upcoming') return time;
+  return `${time} (${macroCalendarDeltaLabel(event, nowUtcMs)})`;
+}
+
 function renderMacroCalendar(serverTimeUtc) {
   stateUi.lastMacroCalendarServerTime = serverTimeUtc || stateUi.lastMacroCalendarServerTime || new Date().toISOString();
   const current = new Date(stateUi.lastMacroCalendarServerTime);
@@ -1360,7 +1425,7 @@ function renderMacroCalendar(serverTimeUtc) {
     const kindEvents = events.filter(ev => ev.status === MACRO_CALENDAR_KINDS[kind].status);
     populateMacroCalendarFilters(kind, kindEvents);
     const filtered = filteredMacroCalendarEvents(kindEvents, kind);
-    const pageData = macroCalendarPageRows(filtered, kind);
+    const pageData = macroCalendarGroupedPageRows(filtered, kind);
     const calendar = macroCalendarState(kind);
     calendar.page = pageData.page;
     if (!pageData.rows.length) {
@@ -1368,14 +1433,21 @@ function renderMacroCalendar(serverTimeUtc) {
       renderMacroCalendarPager(kind, 1, 0);
       return;
     }
-    target.innerHTML = pageData.rows.map(ev => `
-      <div class="calendar-row ${ev.status.toLowerCase()}">
-        ${macroCalendarBadge(ev, nowUtcMs)}
-        <div class="calendar-main">
-          <strong>${escapeHtml(ev.title)}</strong>
-          <div class="calendar-summary">${escapeHtml(ev.status)} - ${escapeHtml(ev.summary)}</div>
+    target.innerHTML = pageData.groups.map(group => `
+      <div class="calendar-day-group ${(group.events[0] || {}).status.toLowerCase()}">
+        ${macroCalendarBadge(group.events[0] || {}, nowUtcMs)}
+        <div class="calendar-day-events">
+          ${(group.events || []).map(ev => `
+            <div class="calendar-row ${ev.status.toLowerCase()}">
+              <div class="calendar-main">
+                <strong>${escapeHtml(ev.title)}</strong>
+                <div class="calendar-event-time">${escapeHtml(macroCalendarEventTime(ev, nowUtcMs))}</div>
+                <div class="calendar-summary">${escapeHtml(ev.status)} - ${escapeHtml(ev.summary)}</div>
+              </div>
+              <div class="calendar-impact"><div class="calendar-meta" style="margin-bottom:5px">Impact</div><div class="impact-dots">${Array.from({ length: 3 }, (_, i) => `<span class="${i < ev.impact ? 'on' : ''}"></span>`).join('')}</div></div>
+            </div>
+          `).join('')}
         </div>
-        <div class="calendar-impact"><div class="calendar-meta" style="margin-bottom:5px">Impact</div><div class="impact-dots">${Array.from({ length: 3 }, (_, i) => `<span class="${i < ev.impact ? 'on' : ''}"></span>`).join('')}</div></div>
       </div>
     `).join('');
     renderMacroCalendarPager(kind, pageData.totalPages, pageData.totalEvents);

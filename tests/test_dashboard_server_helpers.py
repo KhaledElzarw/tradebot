@@ -461,15 +461,20 @@ def test_gst_server_time_and_macro_calendar_update_daily():
     assert "US Data Window" in naive_rendered_html
     assert "Completed - US data window passed" in completed_html
     assert "Upcoming - Watch ETF flow" in upcoming_html
-    assert completed_html.count('class="calendar-row') == 10
-    assert upcoming_html.count('class="calendar-row') == 10
+    assert completed_html.count('class="calendar-day-group') == 2
+    assert upcoming_html.count('class="calendar-day-group') == 2
+    assert completed_html.count('class="calendar-row') == 8
+    assert upcoming_html.count('class="calendar-row') == 7
     assert 'class="status-chip' not in completed_html
     assert 'class="status-chip' not in upcoming_html
-    assert 'class="calendar-icon-day">7</span>' in completed_html
+    assert completed_html.count('class="calendar-icon-day">7</span>') == 1
+    assert 'class="calendar-icon-day">6</span>' in completed_html
     assert 'class="calendar-icon-month">May</span>' in completed_html
     assert 'class="calendar-icon-delta"' not in completed_html
     assert "-0h30m" not in completed_html
     assert 'class="calendar-icon-delta">0h30m</span>' in upcoming_html
+    assert 'class="calendar-event-time">5:30 PM GST (0h30m)</div>' in upcoming_html
+    assert 'class="calendar-event-time">4:30 PM GST</div>' in completed_html
     assert '<span class="calendar-meta">May 7, 2026' not in completed_html
     assert '<span class="calendar-meta">May 7, 2026' not in upcoming_html
     assert dashboard_server._macro_calendar_delta_label(

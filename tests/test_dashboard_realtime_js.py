@@ -625,6 +625,8 @@ def test_ai_decisions_renderer_and_refresh_paths_are_safe(tmp_path):
     assert.ok(!elements.get('completed-macro-calendar').innerHTML.includes('May 1'));
     assert.ok(elements.get('completed-macro-calendar').innerHTML.includes('calendar-icon-day'));
     assert.ok(elements.get('completed-macro-calendar').innerHTML.includes('calendar-icon-month'));
+    assert.ok(elements.get('completed-macro-calendar').innerHTML.includes('calendar-day-group'));
+    assert.ok(elements.get('completed-macro-calendar').innerHTML.includes('calendar-event-time'));
     assert.ok(!elements.get('completed-macro-calendar').innerHTML.includes('calendar-icon-delta'));
     assert.ok(!elements.get('completed-macro-calendar').innerHTML.includes('-0h30m'));
     assert.ok(!elements.get('completed-macro-calendar').innerHTML.includes('<span class="calendar-meta">May 7'));
@@ -632,17 +634,19 @@ def test_ai_decisions_renderer_and_refresh_paths_are_safe(tmp_path):
     assert.ok(elements.get('upcoming-macro-calendar').innerHTML.includes('May 7'));
     assert.ok(elements.get('upcoming-macro-calendar').innerHTML.includes('Upcoming -'));
     assert.ok(!elements.get('upcoming-macro-calendar').innerHTML.includes('Completed -'));
+    assert.ok(elements.get('upcoming-macro-calendar').innerHTML.includes('calendar-day-group'));
     assert.ok(elements.get('upcoming-macro-calendar').innerHTML.includes('calendar-icon-delta'));
     assert.ok(elements.get('upcoming-macro-calendar').innerHTML.includes('0h30m'));
+    assert.ok(elements.get('upcoming-macro-calendar').innerHTML.includes('5:30 PM GST (0h30m)'));
     assert.ok(!elements.get('upcoming-macro-calendar').innerHTML.includes('<span class="calendar-meta">May 7'));
     assert.ok(!elements.get('upcoming-macro-calendar').innerHTML.includes('status-chip'));
     assert.strictEqual(
       (elements.get('completed-macro-calendar').innerHTML.match(/class="calendar-row/g) || []).length,
-      10,
+      8,
     );
     assert.strictEqual(
       (elements.get('upcoming-macro-calendar').innerHTML.match(/class="calendar-row/g) || []).length,
-      10,
+      7,
     );
     assert.ok(elements.get('completed-macro-page-indicator').textContent.includes('Page 1 /'));
     assert.ok(elements.get('upcoming-macro-page-indicator').textContent.includes('Page 1 /'));
@@ -657,7 +661,7 @@ def test_ai_decisions_renderer_and_refresh_paths_are_safe(tmp_path):
       assert.ok(!elements.get('completed-macro-calendar').innerHTML.includes('May 1'));
       assert.strictEqual(
         (elements.get('completed-macro-calendar').innerHTML.match(/class="calendar-row/g) || []).length,
-        10,
+        8,
       );
       assert.doesNotThrow(() => t.changeMacroCalendarPage('completed', 'next'));
       assert.ok(elements.get('completed-macro-page-indicator').textContent.startsWith('Page 2 /'));
