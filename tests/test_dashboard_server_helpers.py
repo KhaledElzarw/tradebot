@@ -326,7 +326,7 @@ def test_parse_json_object_embedded_empty_and_missing():
         dashboard_server._parse_json_object("plain text")
 
 
-def test_fallback_intelligence_pads_cards_and_scores_sentiment():
+def test_fallback_intelligence_scores_news_sentiment_without_padding():
     ohlcv = [
         {"open": 100.0, "high": 102.0, "low": 99.0, "close": 101.0},
         {"open": 101.0, "high": 112.0, "low": 100.0, "close": 111.0},
@@ -352,13 +352,7 @@ def test_fallback_intelligence_pads_cards_and_scores_sentiment():
         ],
     )
 
-    assert [card["sentiment"] for card in payload["newsCards"]] == [
-        "Bullish",
-        "Bearish",
-        "Neutral",
-        "Neutral",
-        "Neutral",
-    ]
+    assert [card["sentiment"] for card in payload["newsCards"]] == ["Bullish", "Bearish"]
     assert payload["newsCards"][0]["impact"] == 6
     assert payload["source"] == "deterministic_fallback"
     assert payload["regimeSignals"][-1]["status"] == "Watch"
@@ -383,24 +377,122 @@ def test_gst_server_time_and_macro_calendar_update_daily():
     naive_events = dashboard_server._macro_calendar_events(
         datetime(2026, 5, 7, 13, 0, 0)
     )
-    assert [event["date"] for event in events] == ["May 7"] * 5
-    assert naive_events[0]["date"] == "May 7"
-    assert [event["status"] for event in events] == [
-        "Completed",
-        "Completed",
-        "Completed",
-        "Upcoming",
-        "Upcoming",
-    ]
+    assert len(events) > 3600
+    assert min(event["year"] for event in events) == 2025
+    assert max(event["year"] for event in events) == 2027
+    assert any(event["date"] == "May 7, 2026" for event in naive_events)
+    page_rows, total_pages, page, total_events = dashboard_server._macro_calendar_page(
+        events
+    )
+    assert page == 0
+    assert total_pages > 300
+    assert total_events == len(events)
+    assert len(page_rows) == 10
+    assert [event["status"] for event in page_rows[:5]] == ["Completed"] * 5
+    assert [event["status"] for event in page_rows[5:]] == ["Upcoming"] * 5
+    assert page_rows[0]["sortTs"] > page_rows[1]["sortTs"]
+    assert page_rows[5]["sortTs"] < page_rows[6]["sortTs"]
 
-    html = dashboard_server._render_macro_calendar(
+    may_2026_us_data = [
+        event for event in events
+        if event["month"] == 5
+        and event["year"] == 2026
+        and event["title"] == "US Data Window"
+    ]
+    filtered_rows, filtered_pages, _page, _total = dashboard_server._macro_calendar_page(
+        may_2026_us_data
+    )
+    assert filtered_pages >= 3
+    assert len(filtered_rows) == 10
+    assert {event["title"] for event in filtered_rows} == {"US Data Window"}
+    completed_only_rows, completed_only_pages, completed_only_page, completed_total = (
+        dashboard_server._macro_calendar_page(
+            [{"status": "Completed", "sortTs": idx} for idx in range(12)],
+            page=1,
+        )
+    )
+    empty_rows, empty_pages, empty_page, empty_total = dashboard_server._macro_calendar_page([])
+    assert [event["sortTs"] for event in completed_only_rows] == [1, 0]
+    assert completed_only_pages == 2
+    assert completed_only_page == 1
+    assert completed_total == 12
+    assert empty_rows == []
+    assert empty_pages == 1
+    assert empty_page == 0
+    assert empty_total == 0
+
+    completed_rows, completed_pages, completed_page, completed_total = dashboard_server._macro_calendar_status_page(
+        events,
+        "Completed",
+    )
+    upcoming_rows, upcoming_pages, upcoming_page, upcoming_total = dashboard_server._macro_calendar_status_page(
+        events,
+        "Upcoming",
+    )
+    assert completed_page == 0
+    assert upcoming_page == 0
+    assert completed_pages > 150
+    assert upcoming_pages > 150
+    assert completed_total + upcoming_total == len(events)
+    assert len(completed_rows) == 10
+    assert len(upcoming_rows) == 10
+    assert {event["status"] for event in completed_rows} == {"Completed"}
+    assert {event["status"] for event in upcoming_rows} == {"Upcoming"}
+    assert completed_rows[0]["sortTs"] > completed_rows[1]["sortTs"]
+    assert upcoming_rows[0]["sortTs"] < upcoming_rows[1]["sortTs"]
+
+    completed_html = dashboard_server._render_macro_calendar(
+        "Completed",
         datetime(2026, 5, 7, 13, 0, 0, tzinfo=timezone.utc)
     )
-    assert "US Data Window" in html
-    assert "Completed - US data window passed" in html
-    assert "Upcoming - Watch ETF flow" in html
-    assert "May 1" not in html
-    assert html.count('class="calendar-row') == 5
+    upcoming_html = dashboard_server._render_macro_calendar(
+        "Upcoming",
+        datetime(2026, 5, 7, 13, 0, 0, tzinfo=timezone.utc)
+    )
+    naive_rendered_html = dashboard_server._render_macro_calendar(
+        "Completed",
+        datetime(2026, 5, 7, 13, 0, 0)
+    )
+    assert "US Data Window" in completed_html
+    assert "US Data Window" in naive_rendered_html
+    assert "Completed - US data window passed" in completed_html
+    assert "Upcoming - Watch ETF flow" in upcoming_html
+    assert (
+        'US Data Window <span class="calendar-event-flag" '
+        'title="United States">🇺🇸</span>'
+    ) in completed_html
+    assert (
+        'Europe Macro / Yields Check <span class="calendar-event-flag" '
+        'title="Europe">🇪🇺</span>'
+    ) in completed_html
+    assert (
+        'Asia Liquidity Open <span class="calendar-event-flag" '
+        'title="Asia session">🇯🇵</span>'
+    ) in upcoming_html
+    assert (
+        'Daily Close Risk Review <span class="calendar-event-flag" '
+        'title="Global crypto close">🌐</span>'
+    ) in upcoming_html
+    assert completed_html.count('class="calendar-day-group') == 2
+    assert upcoming_html.count('class="calendar-day-group') == 2
+    assert completed_html.count('class="calendar-row') == 8
+    assert upcoming_html.count('class="calendar-row') == 7
+    assert 'class="status-chip' not in completed_html
+    assert 'class="status-chip' not in upcoming_html
+    assert completed_html.count('class="calendar-icon-day">7</span>') == 1
+    assert 'class="calendar-icon-day">6</span>' in completed_html
+    assert 'class="calendar-icon-month">May</span>' in completed_html
+    assert 'class="calendar-icon-delta"' not in completed_html
+    assert "-0h30m" not in completed_html
+    assert 'class="calendar-icon-delta">0h30m</span>' in upcoming_html
+    assert 'class="calendar-event-time">5:30 PM GST (0h30m)</div>' in upcoming_html
+    assert 'class="calendar-event-time">4:30 PM GST</div>' in completed_html
+    assert '<span class="calendar-meta">May 7, 2026' not in completed_html
+    assert '<span class="calendar-meta">May 7, 2026' not in upcoming_html
+    assert dashboard_server._macro_calendar_delta_label(
+        {"sortTs": datetime(2026, 5, 20, 13, 0, 0, tzinfo=timezone.utc).timestamp()},
+        datetime(2026, 5, 7, 13, 0, 0, tzinfo=timezone.utc),
+    ) == "13d0h"
 
 
 def test_format_and_server_render_helpers_cover_empty_and_value_rows():
@@ -511,6 +603,12 @@ def test_fetch_news_items_parses_fake_rss_and_dedupes(monkeypatch):
     <pubDate>Mon, 04 May 2026 12:02:00</pubDate>
   </item>
   <item>
+    <title>Old BTC cycle recap</title>
+    <link>https://example.test/old-btc</link>
+    <description>Stale item outside dashboard history window</description>
+    <pubDate>Mon, 01 Dec 2025 12:02:00 GMT</pubDate>
+  </item>
+  <item>
     <title></title>
     <description>Untitled item is skipped</description>
   </item>
@@ -535,7 +633,10 @@ def test_fetch_news_items_parses_fake_rss_and_dedupes(monkeypatch):
     )
     monkeypatch.setattr(dashboard_server.requests, "get", fake_get)
 
-    items = dashboard_server._fetch_news_items(limit=3)
+    items = dashboard_server._fetch_news_items(
+        limit=3,
+        now=datetime(2026, 5, 8, tzinfo=timezone.utc),
+    )
     items_by_title = {item["title"]: item for item in items}
 
     assert set(items_by_title) == {
@@ -543,6 +644,7 @@ def test_fetch_news_items_parses_fake_rss_and_dedupes(monkeypatch):
         "Macro rates watch",
         "Bitcoin rally gains steam",
     }
+    assert "Old BTC cycle recap" not in items_by_title
     assert [item["title"] for item in items].count("Bitcoin rally gains steam") == 1
     assert items_by_title["Macro rates watch"]["publishedUtc"] == "not-a-date"
     assert items_by_title["BTC liquidity build"]["publishedUtc"] == (
@@ -550,6 +652,19 @@ def test_fetch_news_items_parses_fake_rss_and_dedupes(monkeypatch):
     )
     assert items_by_title["Bitcoin rally gains steam"]["source"] == "Fake RSS"
     assert all("sortTs" not in item and "score" not in item for item in items)
+
+
+def test_merge_news_history_keeps_recent_cached_items_and_drops_old():
+    merged = dashboard_server._merge_news_history(
+        [{"title": "Fresh story", "source": "RSS", "publishedUtc": "2026-05-08T10:00:00+00:00"}],
+        [
+            {"title": "Cached recent", "source": "Cache", "publishedUtc": "2026-04-10T10:00:00+00:00"},
+            {"title": "Too old", "source": "Cache", "publishedUtc": "2025-12-01T10:00:00+00:00"},
+        ],
+        now=datetime(2026, 5, 8, tzinfo=timezone.utc),
+    )
+
+    assert [item["title"] for item in merged] == ["Fresh story", "Cached recent"]
 
 
 def test_local_ai_assess_intelligence_uses_fake_ollama_and_openai(monkeypatch):

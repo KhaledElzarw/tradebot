@@ -121,11 +121,11 @@
     .chart-card { grid-column: span 16; min-height:520px; }
     .intelligence-card { grid-column: span 8; min-height:520px; }
     .regime-card { grid-column: span 16; min-height:350px; }
-    .macro-card { grid-column: span 8; min-height:350px; }
+    .macro-card { grid-column: span 12; min-height:620px; }
     .events-card { grid-column: span 12; min-height:320px; }
     .ai-decisions-card { grid-column: span 24; min-height:420px; }
     .orders-card { grid-column: span 24; min-height:360px; }
-    .config-card { grid-column: span 24; min-height:360px; }
+    .config-card { grid-column: span 12; min-height:180px; }
     .status-footer { grid-column: span 24; min-height:140px; }
     .command-strip { display:grid; grid-template-columns: 1.35fr repeat(4, 1fr); gap:0; border:1px solid var(--line); border-radius:10px; overflow:hidden; background:var(--panel-3); }
     .trading-state-main, .metric { padding:16px 18px; min-height:92px; border-right:1px solid var(--line); background:transparent; border-radius:0; }
@@ -302,13 +302,37 @@
     }
     body.light .config-field input, body.light .config-field select { background:#fff; }
     .config-actions { display:flex; justify-content:flex-end; gap:10px; }
+    .config-launcher { justify-content:center; align-items:flex-start; }
+    .config-launcher .btn { min-width:220px; }
+    .modal-backdrop {
+      position:fixed; inset:0; z-index:80; display:grid; place-items:center; padding:20px;
+      background:rgba(23,23,19,.36); backdrop-filter:blur(8px);
+    }
+    .modal-backdrop[hidden] { display:none; }
+    .modal-panel {
+      width:min(1100px, 100%); max-height:min(86vh, 900px); overflow:auto;
+      background:var(--panel); color:var(--text); border:1px solid var(--line);
+      border-radius:10px; box-shadow:0 28px 80px rgba(0,0,0,.28); padding:16px;
+    }
+    .modal-head { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:14px; }
+    .modal-head h2 { margin:0; font-size:1.1rem; }
+    .modal-body { display:flex; flex-direction:column; gap:12px; }
+    body.modal-open { overflow:hidden; }
     .footer-note { color:var(--muted); font-size:.82rem; }
     .boot-error {
       display:none; margin-bottom:12px; border:1px solid rgba(213,69,69,.35); background:rgba(213,69,69,.08);
       color:var(--red); border-radius:8px; padding:10px 12px; font-weight:800;
     }
     .news-stack, .calendar-list { display:flex; flex-direction:column; gap:10px; }
-    .news-card, .calendar-row { border:1px solid var(--line); border-radius:8px; background:var(--panel-3); padding:12px; }
+    .news-stack { flex:1; min-height:0; overflow:auto; padding-right:2px; }
+    .calendar-list { flex:1; min-height:0; overflow:auto; padding-right:2px; }
+    .calendar-toolbar { display:grid; grid-template-columns:repeat(3, minmax(0, 1fr)); gap:8px; }
+    .calendar-toolbar select {
+      width:100%; min-width:0; background:var(--panel-3); color:var(--text);
+      border:1px solid var(--line); border-radius:8px; padding:8px 10px; font:inherit; font-size:.84rem;
+    }
+    .calendar-pager, .news-pager { margin-top:auto; }
+    .news-card, .calendar-day-group { border:1px solid var(--line); border-radius:8px; background:var(--panel-3); padding:12px; }
     .news-title { font-size:1.03rem; line-height:1.2; font-weight:850; margin-bottom:10px; }
     .news-row { display:flex; justify-content:space-between; gap:8px; align-items:center; margin-bottom:10px; }
     .source-chip, .sentiment-chip, .status-chip { border:1px solid var(--line); border-radius:7px; padding:5px 8px; font-size:.78rem; font-weight:800; background:var(--panel-2); }
@@ -329,25 +353,40 @@
     .final-icon { width:76px; height:76px; border:3px solid var(--blue); border-radius:50%; display:grid; place-items:center; margin:0 auto 10px; color:var(--blue); font-size:2rem; }
     .final-title { color:var(--blue); font-size:1.65rem; line-height:1; font-weight:900; }
     .final-copy { color:var(--muted); margin-top:10px; line-height:1.35; }
-    .calendar-row { display:grid; grid-template-columns:34px minmax(0, 1fr) auto auto auto; gap:10px; align-items:start; }
-    .calendar-icon { width:30px; height:30px; border-radius:7px; display:grid; place-items:center; color:#fff; font-weight:900; }
+    .calendar-day-group { display:grid; grid-template-columns:65px minmax(0, 1fr); gap:14px; align-items:start; }
+    .calendar-day-events { min-width:0; display:flex; flex-direction:column; gap:10px; }
+    .calendar-row { display:grid; grid-template-columns:minmax(0, 1fr) auto; gap:12px; align-items:start; border-bottom:1px solid var(--line); padding-bottom:10px; }
+    .calendar-row:last-child { border-bottom:0; padding-bottom:0; }
+    .calendar-icon {
+      width:65px; height:65px; border-radius:8px; display:flex; flex-direction:column; align-items:center; justify-content:center;
+      gap:1px; color:#fff; font-weight:900; line-height:.9; overflow:hidden; text-align:center; flex:0 0 65px;
+    }
+    .calendar-icon-day { font-size:1.55rem; line-height:.86; }
+    .calendar-icon-month { font-size:.68rem; line-height:.82; text-transform:uppercase; }
+    .calendar-icon-delta { font-size:.62rem; line-height:.82; white-space:nowrap; }
     .calendar-main { min-width:0; display:flex; flex-direction:column; gap:5px; }
+    .calendar-event-flag { white-space:nowrap; }
+    .calendar-event-time { color:var(--muted); font-size:.76rem; font-weight:800; text-transform:uppercase; }
     .calendar-summary { color:var(--muted); line-height:1.35; font-size:.84rem; overflow-wrap:anywhere; }
     .calendar-impact { min-width:70px; }
+    .calendar-empty { border:1px dashed var(--line); border-radius:8px; color:var(--muted); padding:16px; text-align:center; }
     .impact-dots { display:flex; gap:5px; justify-content:flex-end; }
     .impact-dots span { width:8px; height:8px; border-radius:50%; background:rgba(23,23,19,.25); }
     .impact-dots span.on { background:var(--btc); }
     .operator-section { margin-top:4px; }
     @media (max-width: 1200px) {
-      .chart-card, .intelligence-card, .regime-card, .macro-card, .events-card, .ai-decisions-card, .orders-card, .config-card, .status-footer { grid-column: span 24 !important; }
+      .chart-card, .intelligence-card, .regime-card, .events-card, .ai-decisions-card, .orders-card, .config-card, .status-footer { grid-column: span 24 !important; }
       .command-strip { grid-template-columns:1fr 1fr; }
       .trading-state-main, .metric { border-bottom:1px solid var(--line); }
       .control-strip, .regime-grid { grid-template-columns: 1fr; }
       .ai-decision-topline { grid-template-columns:1fr; }
       .agent-chat-toolbar { grid-template-columns:1fr 1fr; }
     }
+    @media (max-width: 900px) {
+      .macro-card { grid-column: span 24 !important; }
+    }
     @media (max-width: 720px) {
-      .command-strip, .control-strip, .config-grid, .calendar-row, .ai-decision-chat-grid, .agent-chat-toolbar, .agent-composer { grid-template-columns: 1fr; }
+      .command-strip, .control-strip, .config-grid, .calendar-row, .calendar-toolbar, .ai-decision-chat-grid, .agent-chat-toolbar, .agent-composer { grid-template-columns: 1fr; }
       .ai-agent-list { grid-template-columns:1fr; }
       .metric, .trading-state-main, .mini-control { border-right:0; border-bottom:1px solid var(--line); }
       .state-value { font-size:1.45rem; }

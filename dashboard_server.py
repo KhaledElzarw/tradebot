@@ -6,6 +6,7 @@ import os
 import subprocess
 import time
 import threading
+from calendar import monthrange
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
@@ -70,7 +71,14 @@ NEWS_SOURCES = [
     ("Decrypt", "https://decrypt.co/feed"),
     ("The Block", "https://www.theblock.co/rss.xml"),
 ]
-NEWS_CARD_LIMIT = 5
+NEWS_CARD_LIMIT = 10
+NEWS_PAGE_SIZE = 5
+NEWS_HISTORY_DAYS = 90
+NEWS_HISTORY_LIMIT = max(NEWS_PAGE_SIZE, int(os.getenv("TRADEBOT_DASHBOARD_NEWS_HISTORY_LIMIT", "250")))
+MACRO_CALENDAR_PAGE_SIZE = 10
+MACRO_CALENDAR_SIDE_SIZE = 5
+MACRO_CALENDAR_LOOKBACK_MONTHS = 12
+MACRO_CALENDAR_LOOKAHEAD_MONTHS = 12
 MACRO_CALENDAR_TEMPLATE = [
     {
         "title": "Asia Liquidity Open",
@@ -80,6 +88,8 @@ MACRO_CALENDAR_TEMPLATE = [
         "color": "#1767c2",
         "upcoming": "Watch Asia liquidity, early dollar tone, and grid spread pressure.",
         "completed": "Asia session set the initial liquidity tone for BTC spread and inventory risk.",
+        "geoFlag": "🇯🇵",
+        "geoLabel": "Asia session",
     },
     {
         "title": "Europe Macro / Yields Check",
@@ -89,6 +99,8 @@ MACRO_CALENDAR_TEMPLATE = [
         "color": "#f7931a",
         "upcoming": "Watch EUR/US yields and risk appetite before the US data window.",
         "completed": "Europe macro flow updated rate-pressure context for the active grid.",
+        "geoFlag": "🇪🇺",
+        "geoLabel": "Europe",
     },
     {
         "title": "US Data Window",
@@ -98,6 +110,8 @@ MACRO_CALENDAR_TEMPLATE = [
         "color": "#0d8a2f",
         "upcoming": "Watch scheduled US releases and liquidity reaction around the event.",
         "completed": "US data window passed; confirm whether volatility expanded or faded.",
+        "geoFlag": "🇺🇸",
+        "geoLabel": "United States",
     },
     {
         "title": "US Cash Open / ETF Flow",
@@ -107,6 +121,8 @@ MACRO_CALENDAR_TEMPLATE = [
         "color": "#d54545",
         "upcoming": "Watch ETF flow, equity beta, and headline reaction during the cash open.",
         "completed": "US cash open flow is in; reassess BTC trend pressure and exposure.",
+        "geoFlag": "🇺🇸",
+        "geoLabel": "United States",
     },
     {
         "title": "Daily Close Risk Review",
@@ -116,6 +132,8 @@ MACRO_CALENDAR_TEMPLATE = [
         "color": "#13a7b4",
         "upcoming": "Review realized PnL, open exposure, and overnight grid risk.",
         "completed": "Daily risk review completed; carry only exposure justified by the regime.",
+        "geoFlag": "🌐",
+        "geoLabel": "Global crypto close",
     },
 ]
 AI_ENDPOINTS = [
@@ -221,7 +239,7 @@ HTML = r'''<!doctype html>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Tradebot Live Dashboard</title>
-  <link rel="stylesheet" href="/static/dashboard.v1.css?v=12">
+  <link rel="stylesheet" href="/static/dashboard.v1.css?v=20">
 </head>
 <body>
 <div class="wrap">
@@ -281,7 +299,18 @@ HTML = r'''<!doctype html>
 
     <section class="card intelligence-card" id="intelligence-card" data-default-col="17" data-default-span="8">
       <div class="card-head"><h2>News & Macro Intelligence</h2><div class="card-actions"><span class="footer-note">View All</span></div></div>
-      <div class="card-body"><div class="news-stack" id="news-stack"></div></div>
+      <div class="card-body">
+        <div class="news-stack" id="news-stack"></div>
+        <div class="pager news-pager">
+          <div class="pager-controls">
+            <button class="btn" id="news-first-btn" type="button">First</button>
+            <button class="btn" id="news-prev-btn" type="button">Prev</button>
+            <button class="btn" id="news-next-btn" type="button">Next</button>
+            <button class="btn" id="news-last-btn" type="button">Last</button>
+          </div>
+          <div class="page-indicator" id="news-page-indicator">Page 1 / 1</div>
+        </div>
+      </div>
     </section>
 
     <section class="card regime-card" id="regime-card" data-default-col="1" data-default-span="16">
@@ -301,9 +330,46 @@ HTML = r'''<!doctype html>
       </div>
     </section>
 
-    <section class="card macro-card" id="macro-card" data-default-col="17" data-default-span="8">
-      <div class="card-head"><h2>Macro Calendar</h2><div class="card-actions"><span class="footer-note">Crypto impact</span></div></div>
-      <div class="card-body"><div class="calendar-list" id="macro-calendar"></div></div>
+    <section class="card macro-card completed-macro-card" id="completed-macro-card" data-default-col="1" data-default-span="12">
+      <div class="card-head"><h2>Completed Macro Events</h2><div class="card-actions"><span class="footer-note">Crypto impact</span></div></div>
+      <div class="card-body">
+        <div class="calendar-toolbar">
+          <select id="completed-macro-month-filter" aria-label="Completed macro month"><option value="">All months</option></select>
+          <select id="completed-macro-year-filter" aria-label="Completed macro year"><option value="">All years</option></select>
+          <select id="completed-macro-event-filter" aria-label="Completed macro event"><option value="">All events</option></select>
+        </div>
+        <div class="calendar-list" id="completed-macro-calendar"></div>
+        <div class="pager calendar-pager">
+          <div class="pager-controls">
+            <button class="btn" id="completed-macro-first-btn" type="button">First</button>
+            <button class="btn" id="completed-macro-prev-btn" type="button">Prev</button>
+            <button class="btn" id="completed-macro-next-btn" type="button">Next</button>
+            <button class="btn" id="completed-macro-last-btn" type="button">Last</button>
+          </div>
+          <div class="page-indicator" id="completed-macro-page-indicator">Page 1 / 1</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="card macro-card upcoming-macro-card" id="upcoming-macro-card" data-default-col="13" data-default-span="12">
+      <div class="card-head"><h2>Upcoming Macro Events</h2><div class="card-actions"><span class="footer-note">Crypto impact</span></div></div>
+      <div class="card-body">
+        <div class="calendar-toolbar">
+          <select id="upcoming-macro-month-filter" aria-label="Upcoming macro month"><option value="">All months</option></select>
+          <select id="upcoming-macro-year-filter" aria-label="Upcoming macro year"><option value="">All years</option></select>
+          <select id="upcoming-macro-event-filter" aria-label="Upcoming macro event"><option value="">All events</option></select>
+        </div>
+        <div class="calendar-list" id="upcoming-macro-calendar"></div>
+        <div class="pager calendar-pager">
+          <div class="pager-controls">
+            <button class="btn" id="upcoming-macro-first-btn" type="button">First</button>
+            <button class="btn" id="upcoming-macro-prev-btn" type="button">Prev</button>
+            <button class="btn" id="upcoming-macro-next-btn" type="button">Next</button>
+            <button class="btn" id="upcoming-macro-last-btn" type="button">Last</button>
+          </div>
+          <div class="page-indicator" id="upcoming-macro-page-indicator">Page 1 / 1</div>
+        </div>
+      </div>
     </section>
 
     <section class="card events-card" id="events-card" data-default-col="1" data-default-span="12">
@@ -357,11 +423,8 @@ HTML = r'''<!doctype html>
 
     <section class="card config-card" id="config-card" data-default-col="13" data-default-span="12">
       <div class="card-head"><h2>Bot Configuration</h2><div class="card-actions"><span class="drag-hint">editable</span></div></div>
-      <div class="card-body">
-        <div class="config-grid" id="config-form-grid"></div>
-        <div class="config-actions">
-          <button class="btn" id="config-save-btn" type="button">Save configuration</button>
-        </div>
+      <div class="card-body config-launcher">
+        <button class="btn" id="config-open-btn" type="button">Open Bot Configuration</button>
       </div>
     </section>
 
@@ -393,7 +456,21 @@ HTML = r'''<!doctype html>
     </section>
   </div>
 </div>
-<script src="/static/dashboard.v1.js?v=12"></script>
+<div class="modal-backdrop" id="config-modal" hidden>
+  <div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="config-modal-title">
+    <div class="modal-head">
+      <h2 id="config-modal-title">Bot Configuration</h2>
+      <button class="btn" id="config-close-btn" type="button">Close</button>
+    </div>
+    <div class="modal-body">
+      <div class="config-grid" id="config-form-grid"></div>
+      <div class="config-actions">
+        <button class="btn" id="config-save-btn" type="button">Save configuration</button>
+      </div>
+    </div>
+  </div>
+</div>
+<script src="/static/dashboard.v1.js?v=20"></script>
 </body>
 </html>'''
 
@@ -1217,28 +1294,96 @@ def _parse_json_object(text: str) -> dict:
     return json.loads(text[start:end + 1])
 
 
-def _fetch_news_items(limit: int = 12) -> list[dict]:
+def _parse_news_datetime(value: str) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    for parser in (
+        parsedate_to_datetime,
+        lambda text: datetime.fromisoformat(text.replace("Z", "+00:00")),
+    ):
+        try:
+            dt = parser(raw)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc)
+        except Exception:
+            continue
+    return None
+
+
+def _normalize_news_history_item(item: dict) -> dict:
+    title = _strip_html(str(item.get("title") or "Crypto market update")).strip()
+    return {
+        "source": str(item.get("source") or "RSS").strip() or "RSS",
+        "title": title[:180] or "Crypto market update",
+        "url": str(item.get("url") or item.get("link") or "").strip(),
+        "summary": _strip_html(str(item.get("summary") or item.get("description") or ""))[:260],
+        "publishedUtc": str(item.get("publishedUtc") or "").strip(),
+    }
+
+
+def _merge_news_history(
+    latest_items: list[dict],
+    cached_items: list[dict] | None,
+    *,
+    now: datetime | None = None,
+    history_days: int = NEWS_HISTORY_DAYS,
+    limit: int = NEWS_HISTORY_LIMIT,
+) -> list[dict]:
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    cutoff = current.astimezone(timezone.utc) - timedelta(days=history_days)
+    merged: list[tuple[float, int, dict]] = []
+    seen: set[str] = set()
+    for index, item in enumerate([*(latest_items or []), *((cached_items or []) if isinstance(cached_items, list) else [])]):
+        if not isinstance(item, dict):
+            continue
+        normalized = _normalize_news_history_item(item)
+        title_key = normalized["title"].strip().lower()
+        url_key = normalized["url"].strip().lower()
+        key = url_key or title_key
+        if not key or key in seen:
+            continue
+        dt = _parse_news_datetime(normalized.get("publishedUtc", ""))
+        if dt and dt < cutoff:
+            continue
+        seen.add(key)
+        merged.append((dt.timestamp() if dt else 0.0, index, normalized))
+    merged.sort(key=lambda row: (row[0], -row[1]), reverse=True)
+    return [item for _sort_ts, _index, item in merged[:limit]]
+
+
+def _fetch_news_items(
+    limit: int = NEWS_HISTORY_LIMIT,
+    now: datetime | None = None,
+    history_days: int = NEWS_HISTORY_DAYS,
+) -> list[dict]:
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    cutoff = current.astimezone(timezone.utc) - timedelta(days=history_days)
     items: list[dict] = []
     for source, url in NEWS_SOURCES:
         try:
             resp = requests.get(url, timeout=12, headers={"User-Agent": "tradebot-dashboard/1.0"})
             resp.raise_for_status()
             root = ET.fromstring(resp.content)
-            for node in root.findall(".//item")[:8]:
+            for node in root.findall(".//item")[:max(8, min(50, limit))]:
                 title = _strip_html(node.findtext("title") or "")
                 link = (node.findtext("link") or "").strip()
                 desc = _strip_html(node.findtext("description") or "")
                 pub_raw = node.findtext("pubDate") or ""
                 published = ""
                 sort_ts = 0.0
-                try:
-                    dt = parsedate_to_datetime(pub_raw)
-                    if dt.tzinfo is None:
-                        dt = dt.replace(tzinfo=timezone.utc)
-                    dt = dt.astimezone(timezone.utc)
+                dt = _parse_news_datetime(pub_raw)
+                if dt:
+                    if dt < cutoff:
+                        continue
                     published = dt.isoformat()
                     sort_ts = dt.timestamp()
-                except Exception:
+                else:
                     published = pub_raw
                 if not title:
                     continue
@@ -1260,7 +1405,7 @@ def _fetch_news_items(limit: int = 12) -> list[dict]:
             continue
     deduped: list[dict] = []
     seen: set[str] = set()
-    for item in sorted(items, key=lambda x: (x.get("score", 0), x.get("sortTs", 0)), reverse=True):
+    for item in sorted(items, key=lambda x: (x.get("sortTs", 0), x.get("score", 0)), reverse=True):
         key = item["title"].lower()
         if key in seen:
             continue
@@ -1385,14 +1530,17 @@ def _fallback_intelligence(status: dict, ohlcv: list[dict], news_items: list[dic
             "impact": 6 if "bitcoin" in title_l or "btc" in title_l else 4,
             "url": item.get("url", ""),
         })
-    while len(cards) < NEWS_CARD_LIMIT:
-        cards.append({"title": "Awaiting fresh crypto headlines", "source": "Local", "age": "30m refresh", "sentiment": "Neutral", "impact": 3, "url": ""})
     return {"newsCards": cards, "regimeSignals": rows, "finalRegime": final, "source": "deterministic_fallback", "model": "", "error": error}
 
 
 def refresh_intelligence(state: dict, status: dict, ohlcv: list[dict]) -> dict:
     started = datetime.now(timezone.utc)
-    news_items = _fetch_news_items()
+    cached = read_json(INTELLIGENCE_PATH)
+    news_items = _merge_news_history(
+        _fetch_news_items(),
+        cached.get("rawNews") if isinstance(cached, dict) else [],
+        now=started,
+    )
     error = ""
     try:
         if state.get("aiEnabled", True):
@@ -1440,6 +1588,7 @@ def get_intelligence(state: dict, status: dict, ohlcv: list[dict], force: bool =
         return cached
     if not force:
         news_items = _fetch_news_items()
+        news_items = _merge_news_history(news_items, cached.get("rawNews") if isinstance(cached, dict) else [])
         payload = _fallback_intelligence(status, ohlcv, news_items, "local AI refresh starting in background")
         now = datetime.now(timezone.utc)
         payload["generatedAtUtc"] = now.isoformat()
@@ -1594,55 +1743,243 @@ def _render_impact_bars(level, color: str = "orange", size: int = 8) -> str:
     return '<div class="impact-bars">' + "".join(f'<span class="{"on " + cls if i < level_i else ""}"></span>' for i in range(size)) + "</div>"
 
 
+def _shift_month(year: int, month: int, delta: int) -> tuple[int, int]:
+    month_index = (year * 12) + (month - 1) + delta
+    return month_index // 12, (month_index % 12) + 1
+
+
 def _macro_calendar_events(now: datetime | None = None) -> list[dict]:
     current = now or datetime.now(timezone.utc)
     if current.tzinfo is None:
         current = current.replace(tzinfo=timezone.utc)
     gst_now = current.astimezone(GST)
     events = []
-    for item in MACRO_CALENDAR_TEMPLATE:
-        event_gst = gst_now.replace(
-            hour=int(item["hour"]),
-            minute=int(item["minute"]),
-            second=0,
-            microsecond=0,
-        )
-        completed = gst_now >= event_gst
-        hour = event_gst.hour % 12 or 12
-        ampm = "AM" if event_gst.hour < 12 else "PM"
-        events.append({
-            "title": item["title"],
-            "date": f"{event_gst:%b} {event_gst.day}",
-            "time": f"{hour}:{event_gst:%M} {ampm} GST",
-            "impact": item["impact"],
-            "color": item["color"],
-            "status": "Completed" if completed else "Upcoming",
-            "summary": item["completed"] if completed else item["upcoming"],
-        })
+    for month_offset in range(
+        -MACRO_CALENDAR_LOOKBACK_MONTHS,
+        MACRO_CALENDAR_LOOKAHEAD_MONTHS + 1,
+    ):
+        year, month = _shift_month(gst_now.year, gst_now.month, month_offset)
+        for day in range(1, monthrange(year, month)[1] + 1):
+            for item in MACRO_CALENDAR_TEMPLATE:
+                event_gst = datetime(
+                    year,
+                    month,
+                    day,
+                    int(item["hour"]),
+                    int(item["minute"]),
+                    tzinfo=GST,
+                )
+                completed = gst_now >= event_gst
+                hour = event_gst.hour % 12 or 12
+                ampm = "AM" if event_gst.hour < 12 else "PM"
+                events.append({
+                    "title": item["title"],
+                    "year": event_gst.year,
+                    "month": event_gst.month,
+                    "monthName": event_gst.strftime("%b"),
+                    "day": event_gst.day,
+                    "date": f"{event_gst:%b} {event_gst.day}, {event_gst.year}",
+                    "time": f"{hour}:{event_gst:%M} {ampm} GST",
+                    "sortTs": event_gst.timestamp(),
+                    "impact": item["impact"],
+                    "color": item["color"],
+                    "geoFlag": item["geoFlag"],
+                    "geoLabel": item["geoLabel"],
+                    "status": "Completed" if completed else "Upcoming",
+                    "summary": item["completed"] if completed else item["upcoming"],
+                })
     return events
 
 
-def _render_macro_calendar(now: datetime | None = None) -> str:
-    rows = []
-    for idx, event in enumerate(_macro_calendar_events(now), start=1):
-        status = str(event["status"])
-        status_cls = "good" if status == "Completed" else "warn"
-        dots = "".join(
-            f'<span class="{"on" if i < int(event["impact"]) else ""}"></span>'
-            for i in range(3)
+def _macro_calendar_page(
+    events: list[dict],
+    page: int = 0,
+    page_size: int = MACRO_CALENDAR_PAGE_SIZE,
+) -> tuple[list[dict], int, int, int]:
+    completed = sorted(
+        [event for event in events if event.get("status") == "Completed"],
+        key=lambda event: float(event.get("sortTs") or 0),
+        reverse=True,
+    )
+    upcoming = sorted(
+        [event for event in events if event.get("status") == "Upcoming"],
+        key=lambda event: float(event.get("sortTs") or 0),
+    )
+    total_events = len(completed) + len(upcoming)
+    if completed and upcoming:
+        side_size = max(1, min(MACRO_CALENDAR_SIDE_SIZE, page_size // 2))
+        total_pages = max(
+            1,
+            math.ceil(len(completed) / side_size),
+            math.ceil(len(upcoming) / side_size),
         )
+        page = max(0, min(total_pages - 1, int(page or 0)))
+        start = page * side_size
+        rows = completed[start:start + side_size] + upcoming[start:start + side_size]
+        return rows, total_pages, page, total_events
+
+    rows_source = completed or upcoming
+    total_pages = max(1, math.ceil(len(rows_source) / page_size))
+    page = max(0, min(total_pages - 1, int(page or 0)))
+    start = page * page_size
+    return rows_source[start:start + page_size], total_pages, page, total_events
+
+
+def _macro_calendar_status_page(
+    events: list[dict],
+    status: str,
+    page: int = 0,
+    page_size: int = MACRO_CALENDAR_PAGE_SIZE,
+) -> tuple[list[dict], int, int, int]:
+    status_label = "Completed" if status == "Completed" else "Upcoming"
+    rows_source = sorted(
+        [event for event in events if event.get("status") == status_label],
+        key=lambda event: float(event.get("sortTs") or 0),
+        reverse=status_label == "Completed",
+    )
+    total_events = len(rows_source)
+    total_pages = max(1, math.ceil(total_events / page_size))
+    page = max(0, min(total_pages - 1, int(page or 0)))
+    start = page * page_size
+    return rows_source[start:start + page_size], total_pages, page, total_events
+
+
+def _macro_calendar_day_groups(rows: list[dict]) -> list[dict]:
+    groups: list[dict] = []
+    for event in rows:
+        key = (event.get("year"), event.get("month"), event.get("day"))
+        if groups and groups[-1]["key"] == key:
+            groups[-1]["events"].append(event)
+        else:
+            groups.append({"key": key, "events": [event]})
+    return groups
+
+
+def _macro_calendar_group_pages(
+    groups: list[dict],
+    page_size: int = MACRO_CALENDAR_PAGE_SIZE,
+) -> list[list[dict]]:
+    pages: list[list[dict]] = []
+    page_groups: list[dict] = []
+    page_count = 0
+    for group in groups:
+        group_size = max(1, len(group.get("events") or []))
+        if page_groups and page_count + group_size > page_size:
+            pages.append(page_groups)
+            page_groups = []
+            page_count = 0
+        page_groups.append(group)
+        page_count += group_size
+    if page_groups:
+        pages.append(page_groups)
+    return pages or [[]]
+
+
+def _macro_calendar_grouped_status_page(
+    events: list[dict],
+    status: str,
+    page: int = 0,
+    page_size: int = MACRO_CALENDAR_PAGE_SIZE,
+) -> tuple[list[dict], int, int, int]:
+    status_label = "Completed" if status == "Completed" else "Upcoming"
+    rows_source = sorted(
+        [event for event in events if event.get("status") == status_label],
+        key=lambda event: float(event.get("sortTs") or 0),
+        reverse=status_label == "Completed",
+    )
+    total_events = len(rows_source)
+    grouped_pages = _macro_calendar_group_pages(
+        _macro_calendar_day_groups(rows_source),
+        page_size,
+    )
+    total_pages = max(1, len(grouped_pages))
+    page = max(0, min(total_pages - 1, int(page or 0)))
+    return grouped_pages[page] if total_events else [], total_pages, page, total_events
+
+
+def _macro_calendar_delta_label(event: dict, current: datetime) -> str:
+    event_ts = float(event.get("sortTs") or current.timestamp())
+    diff_seconds = event_ts - current.timestamp()
+    total_minutes = max(0, int(abs(diff_seconds) // 60))
+    hours, minutes = divmod(total_minutes, 60)
+    prefix = "-" if diff_seconds < 0 else ""
+    if hours > 99:
+        days, rem_hours = divmod(hours, 24)
+        return f"{prefix}{days}d{rem_hours}h"
+    return f"{prefix}{hours}h{minutes:02d}m"
+
+
+def _render_macro_calendar_badge(event: dict, current: datetime) -> str:
+    day = html_lib.escape(str(event.get("day") or ""))
+    month = html_lib.escape(str(event.get("monthName") or ""))
+    delta = html_lib.escape(_macro_calendar_delta_label(event, current))
+    title_text = f'{event.get("date", "")} {event.get("time", "")}'
+    if event.get("status") == "Upcoming":
+        title_text = f"{title_text} - {delta}"
+    title = html_lib.escape(title_text)
+    color = html_lib.escape(str(event.get("color") or "#1767c2"))
+    delta_html = (
+        f'<span class="calendar-icon-delta">{delta}</span>'
+        if event.get("status") == "Upcoming"
+        else ""
+    )
+    return (
+        f'<div class="calendar-icon" style="background:{color}" title="{title}">'
+        f'<span class="calendar-icon-day">{day}</span>'
+        f'<span class="calendar-icon-month">{month}</span>'
+        f"{delta_html}"
+        "</div>"
+    )
+
+
+def _render_macro_calendar(status: str, now: datetime | None = None) -> str:
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    rows = []
+    page_groups, _total_pages, page, _total_events = _macro_calendar_grouped_status_page(
+        _macro_calendar_events(current),
+        status,
+    )
+    for group in page_groups:
+        event_rows = []
+        group_events = group["events"]
+        for event in group_events:
+            event_status = str(event["status"])
+            time_label = str(event.get("time") or "")
+            if event_status == "Upcoming":
+                time_label = f"{time_label} ({_macro_calendar_delta_label(event, current)})"
+            flag = str(event.get("geoFlag") or "")
+            flag_html = (
+                ' <span class="calendar-event-flag"'
+                f' title="{html_lib.escape(str(event.get("geoLabel") or ""))}">'
+                f"{html_lib.escape(flag)}</span>"
+                if flag
+                else ""
+            )
+            dots = "".join(
+                f'<span class="{"on" if i < int(event["impact"]) else ""}"></span>'
+                for i in range(3)
+            )
+            event_rows.append(
+                f'<div class="calendar-row {event_status.lower()}">'
+                '<div class="calendar-main">'
+                f'<strong>{html_lib.escape(str(event["title"]))}{flag_html}</strong>'
+                f'<div class="calendar-event-time">{html_lib.escape(time_label)}</div>'
+                f'<div class="calendar-summary">{html_lib.escape(event_status)} - {html_lib.escape(str(event["summary"]))}</div>'
+                "</div>"
+                '<div class="calendar-impact">'
+                '<div class="calendar-meta" style="margin-bottom:5px">Impact</div>'
+                f'<div class="impact-dots">{dots}</div>'
+                "</div>"
+                "</div>"
+            )
+        group_status = str(group_events[0]["status"])
         rows.append(
-            f'<div class="calendar-row {status.lower()}">'
-            f'<div class="calendar-icon" style="background:{html_lib.escape(str(event["color"]))}">{idx}</div>'
-            '<div class="calendar-main">'
-            f'<strong>{html_lib.escape(str(event["title"]))}</strong>'
-            f'<div class="calendar-summary">{html_lib.escape(status)} - {html_lib.escape(str(event["summary"]))}</div>'
-            "</div>"
-            f'<span class="calendar-meta">{html_lib.escape(str(event["date"]))}<br>{html_lib.escape(str(event["time"]))}</span>'
-            f'<span class="status-chip {status_cls}">{html_lib.escape(status)}</span>'
-            '<div class="calendar-impact">'
-            '<div class="calendar-meta" style="margin-bottom:5px">Impact</div>'
-            f'<div class="impact-dots">{dots}</div>'
+            f'<div class="calendar-day-group {group_status.lower()}">'
+            f'{_render_macro_calendar_badge(group_events[0], current)}'
+            '<div class="calendar-day-events">'
+            f'{"".join(event_rows)}'
             "</div>"
             "</div>"
         )
@@ -1650,44 +1987,73 @@ def _render_macro_calendar(now: datetime | None = None) -> str:
 
 
 def _normalized_news_cards(intelligence: dict) -> list[dict]:
-    cards = [
-        dict(card)
-        for card in (intelligence.get("newsCards") or [])
-        if isinstance(card, dict)
-    ]
-    seen_titles = {str(card.get("title") or "").strip().lower() for card in cards}
-    for item in [
-        raw
-        for raw in (intelligence.get("rawNews") or [])
-        if isinstance(raw, dict)
-    ]:
-        title = str(item.get("title") or "Crypto market update").strip()
-        title_key = title.lower()
-        if len(cards) < NEWS_CARD_LIMIT and title_key and title_key not in seen_titles:
-            title_l = title.lower()
-            cards.append({
-                "title": title,
-                "source": item.get("source") or "RSS",
-                "age": str(item.get("publishedUtc") or "latest")[:16].replace("T", " "),
-                "sentiment": _news_sentiment(title_l),
-                "impact": 6 if "bitcoin" in title_l or "btc" in title_l else 4,
-                "url": item.get("url") or "",
-            })
-            seen_titles.add(title_key)
-    while len(cards) < NEWS_CARD_LIMIT:
+    current = datetime.now(timezone.utc)
+    cutoff = current - timedelta(days=NEWS_HISTORY_DAYS)
+    cards: list[dict] = []
+    seen: set[str] = set()
+
+    def add_card(card: dict, *, from_raw: bool = False) -> None:
+        title = str(card.get("title") or "Crypto market update").strip()
+        if not title or title == "Awaiting fresh crypto headlines":
+            return
+        url = str(card.get("url") or "").strip()
+        key = url.lower() or title.lower()
+        if key in seen:
+            return
+        dt = _parse_news_datetime(str(card.get("publishedUtc") or card.get("age") or ""))
+        if dt and dt < cutoff:
+            return
+        title_l = title.lower()
+        age = (
+            str(card.get("age") or "")
+            or str(card.get("publishedUtc") or "latest")[:16].replace("T", " ")
+        )
         cards.append({
+            "title": title,
+            "source": card.get("source") or ("RSS" if from_raw else "Local AI"),
+            "age": age,
+            "publishedUtc": card.get("publishedUtc") or "",
+            "sentiment": card.get("sentiment") or _news_sentiment(title_l),
+            "impact": card.get("impact") or (6 if "bitcoin" in title_l or "btc" in title_l else 4),
+            "url": url,
+            "_sortTs": dt.timestamp() if dt else 0.0,
+        })
+        seen.add(key)
+
+    for card in (intelligence.get("newsCards") or []):
+        if isinstance(card, dict):
+            add_card(dict(card))
+    for raw in (intelligence.get("rawNews") or []):
+        if isinstance(raw, dict):
+            item = _normalize_news_history_item(raw)
+            add_card(item, from_raw=True)
+    cards.sort(key=lambda card: float(card.get("_sortTs") or 0.0), reverse=True)
+    if not cards:
+        return [{
             "title": "Awaiting fresh crypto headlines",
             "source": "Local",
             "age": "30m refresh",
             "sentiment": "Neutral",
             "impact": 3,
             "url": "",
-        })
-    return cards[:NEWS_CARD_LIMIT]
+        }]
+    return [{k: v for k, v in card.items() if k != "_sortTs"} for card in cards[:NEWS_HISTORY_LIMIT]]
+
+
+def _news_page(
+    cards: list[dict],
+    page: int = 0,
+    page_size: int = NEWS_PAGE_SIZE,
+) -> tuple[list[dict], int, int, int]:
+    total_events = len(cards)
+    total_pages = max(1, math.ceil(total_events / page_size))
+    page = max(0, min(total_pages - 1, int(page or 0)))
+    start = page * page_size
+    return cards[start:start + page_size], total_pages, page, total_events
 
 
 def _render_server_news(intelligence: dict) -> str:
-    cards = _normalized_news_cards(intelligence)
+    cards, _total_pages, _page, _total_events = _news_page(_normalized_news_cards(intelligence))
     out = []
     for card in cards:
         sentiment = str(card.get("sentiment") or "Neutral")
@@ -1707,6 +2073,28 @@ def _render_server_news(intelligence: dict) -> str:
             '</div>'
         )
     return "".join(out)
+
+
+def _render_news_page_label(intelligence: dict) -> str:
+    _cards, total_pages, page, total_events = _news_page(_normalized_news_cards(intelligence))
+    suffix = "story" if total_events == 1 else "stories"
+    return f"Page {page + 1} / {total_pages} • {total_events} {suffix}"
+
+
+def _dashboard_ai_mode_label(ai_enabled: bool, ai: dict) -> str:
+    if not ai_enabled:
+        return "off"
+    parts = []
+    if ai.get("dryRun"):
+        parts.append("dry-run")
+    if ai.get("shadowMode"):
+        parts.append("shadow")
+    if ai.get("stale"):
+        reason = str(ai.get("source") or "").replace("_", " ").strip()
+        parts.append(f"stale ({reason})" if reason else "stale")
+    else:
+        parts.append("live")
+    return " / ".join(parts)
 
 
 def _render_server_signals(intelligence: dict) -> str:
@@ -1763,16 +2151,25 @@ def render_initial_dashboard_html(interval_override: str | None = None) -> str:
         ]
     )
     news_html = _render_server_news(intelligence)
+    news_page_label = _render_news_page_label(intelligence)
     signal_html = _render_server_signals(intelligence)
     final_regime = intelligence.get("finalRegime") or {}
-    calendar_html = _render_macro_calendar()
+    completed_calendar_html = _render_macro_calendar("Completed")
+    upcoming_calendar_html = _render_macro_calendar("Upcoming")
+    ai_enabled = state.get("aiEnabled", True) is not False
+    ai_status = ((status.get("stats") or {}).get("ai") or (runtime.get("ai") or {})) if ai_enabled else {}
+    ai_endpoint_key = infer_ai_endpoint_key(state)
+    ai_endpoint = AI_ENDPOINT_BY_KEY.get(ai_endpoint_key) or AI_ENDPOINT_BY_KEY["custom"]
     status_html = "".join(
         f'<div class="kv"><div class="k">{label}</div><div class="v">{html_lib.escape(str(value))}</div></div>'
         for label, value in [
             ("Status timestamp", status.get("tsUtc") or "--"),
             ("Runtime saved", runtime.get("savedAt") or "--"),
             ("Grid status", "Active" if ((runtime.get("grid") or {}).get("orders") or []) else "Idle"),
+            ("AI endpoint", ai_endpoint.get("label") or ai_endpoint_key),
             ("AI model", (status.get("stats") or {}).get("ai", {}).get("model") or state.get("aiModel") or "--"),
+            ("AI confidence", _fmt_pct(ai_status.get("confidence")) if ai_status.get("confidence") is not None else "--"),
+            ("AI mode", _dashboard_ai_mode_label(ai_enabled, ai_status)),
         ]
     )
     timeframe_html = "".join(
@@ -1802,12 +2199,14 @@ def render_initial_dashboard_html(interval_override: str | None = None) -> str:
         '<tbody id="orders-body"></tbody>': f'<tbody id="orders-body">{_render_server_orders(orders, price)}</tbody>',
         '<div class="config-grid" id="config-form-grid"></div>': f'<div class="config-grid" id="config-form-grid">{_render_server_config(state)}</div>',
         'id="news-stack"></div>': f'id="news-stack">{news_html}</div>',
+        'id="news-page-indicator">Page 1 / 1</div>': f'id="news-page-indicator">{html_lib.escape(news_page_label)}</div>',
         '<span class="footer-note">View All</span>': f'<span class="footer-note">{intel_note}</span>',
         'id="signal-table"></div>': f'id="signal-table">{signal_html}</div>',
         'id="regime-updated">live</span>': f'id="regime-updated">AI refresh {html_lib.escape(str(generated)[11:16] or "now")}</span>',
         'id="final-regime-title">Range Consolidation</div>': f'id="final-regime-title">{final_title}</div>',
         'id="final-regime-copy">Choppy price action within established range. Maintain grid discipline and capital efficiency.</div>': f'id="final-regime-copy">{final_copy}</div>',
-        'id="macro-calendar"></div>': f'id="macro-calendar">{calendar_html}</div>',
+        'id="completed-macro-calendar"></div>': f'id="completed-macro-calendar">{completed_calendar_html}</div>',
+        'id="upcoming-macro-calendar"></div>': f'id="upcoming-macro-calendar">{upcoming_calendar_html}</div>',
         'id="status-list"></div>': f'id="status-list">{status_html}</div>',
     }
     for old, new in replacements.items():

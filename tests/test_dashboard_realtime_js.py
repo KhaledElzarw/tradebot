@@ -55,15 +55,21 @@ def test_dashboard_boot_tolerates_cards_without_heads(tmp_path):
     const ids = [
       'theme-toggle','bot-toggle-btn','ai-toggle-btn','reset-layout-btn','events-first-btn','events-prev-btn','events-next-btn','events-last-btn',
       'orders-tab-open-btn','orders-tab-history-btn','orders-filter-buy-btn','orders-filter-sell-btn','orders-first-btn','orders-prev-btn','orders-next-btn','orders-last-btn',
-      'config-save-btn','dashboard','summary-card','market-card','intelligence-card','regime-card','macro-card','events-card','orders-card','config-card','status-card',
+      'config-open-btn','config-close-btn','config-save-btn','config-modal',
+      'dashboard','summary-card','market-card','intelligence-card','regime-card',
+      'completed-macro-card','upcoming-macro-card','events-card','orders-card',
+      'config-card','status-card',
       'fresh-label','server-time','sticky-summary','trading-state-label','state-mode','state-risk','state-exposure','state-action','chart-price-pill','chart-quote-line',
       'status-list','events-body','events-page-indicator','orders-body','orders-page-indicator','timeframe-controls','news-stack','signal-table','final-regime-title',
-      'final-regime-copy','regime-updated','macro-calendar','config-form-grid','market-legend','hover-ohlcv','latest-candle','market-chart','chart-stream-status','boot-error','top-timeframe'
+      'final-regime-copy','regime-updated','completed-macro-calendar',
+      'upcoming-macro-calendar','config-form-grid','market-legend','hover-ohlcv',
+      'latest-candle','market-chart','chart-stream-status','boot-error','top-timeframe'
     ];
     const elements = new Map(ids.map(id => [id, makeElement(id)]));
     const cards = [
-      'summary-card','market-card','intelligence-card','regime-card','macro-card',
-      'events-card','orders-card','config-card','status-card',
+      'summary-card','market-card','intelligence-card','regime-card',
+      'completed-macro-card','upcoming-macro-card','events-card','orders-card',
+      'config-card','status-card',
     ].map(id => elements.get(id));
     cards.forEach(card => {
       card.dataset.defaultSpan = '8';
@@ -222,22 +228,26 @@ def test_refresh_tolerates_missing_optional_refresh_controls(tmp_path):
       'events-first-btn','events-prev-btn','events-next-btn','events-last-btn',
       'orders-tab-open-btn','orders-tab-history-btn','orders-filter-buy-btn',
       'orders-filter-sell-btn','orders-first-btn','orders-prev-btn',
-      'orders-next-btn','orders-last-btn','config-save-btn','dashboard',
-      'summary-card','market-card','intelligence-card','regime-card','macro-card',
+      'orders-next-btn','orders-last-btn','config-open-btn','config-close-btn',
+      'config-save-btn','config-modal','dashboard',
+      'summary-card','market-card','intelligence-card','regime-card',
+      'completed-macro-card','upcoming-macro-card',
       'events-card','orders-card','config-card','status-card','fresh-label',
       'server-time','sticky-summary','trading-state-label','state-mode',
       'state-risk','state-exposure','state-action','chart-price-pill',
       'chart-quote-line','status-list','events-body','events-page-indicator',
       'orders-body','orders-page-indicator','timeframe-controls','news-stack',
       'signal-table','final-regime-title','final-regime-copy','regime-updated',
-      'macro-calendar','config-form-grid','market-legend','hover-ohlcv',
+      'completed-macro-calendar','upcoming-macro-calendar',
+      'config-form-grid','market-legend','hover-ohlcv',
       'latest-candle','market-chart','chart-stream-status','boot-error',
       'top-timeframe'
     ];
     const elements = new Map(ids.map(id => [id, makeElement(id)]));
     const cards = [
-      'summary-card','market-card','intelligence-card','regime-card','macro-card',
-      'events-card','orders-card','config-card','status-card',
+      'summary-card','market-card','intelligence-card','regime-card',
+      'completed-macro-card','upcoming-macro-card','events-card','orders-card',
+      'config-card','status-card',
     ].map(id => elements.get(id));
     cards.forEach(card => {
       card.dataset.defaultSpan = '8';
@@ -431,12 +441,23 @@ def test_ai_decisions_renderer_and_refresh_paths_are_safe(tmp_path):
       'agent-proposals','agent-chat-input','agent-chat-send-btn',
       'orders-filter-buy-btn','orders-filter-sell-btn','orders-first-btn',
       'orders-prev-btn','orders-next-btn','orders-last-btn','config-save-btn',
+      'config-open-btn','config-close-btn','config-modal',
       'fresh-label','server-time','sticky-summary','trading-state-label',
       'state-mode','state-risk','state-exposure','state-action','chart-price-pill',
       'chart-quote-line','status-list','events-body','events-page-indicator',
       'ai-decisions-body','ai-decisions-page-indicator','orders-body',
       'orders-page-indicator','timeframe-controls','news-stack','signal-table',
-      'final-regime-title','final-regime-copy','regime-updated','macro-calendar',
+      'news-first-btn','news-prev-btn','news-next-btn','news-last-btn','news-page-indicator',
+      'final-regime-title','final-regime-copy','regime-updated',
+      'completed-macro-calendar','completed-macro-month-filter',
+      'completed-macro-year-filter','completed-macro-event-filter',
+      'completed-macro-first-btn','completed-macro-prev-btn',
+      'completed-macro-next-btn','completed-macro-last-btn',
+      'completed-macro-page-indicator','upcoming-macro-calendar',
+      'upcoming-macro-month-filter','upcoming-macro-year-filter',
+      'upcoming-macro-event-filter','upcoming-macro-first-btn',
+      'upcoming-macro-prev-btn','upcoming-macro-next-btn',
+      'upcoming-macro-last-btn','upcoming-macro-page-indicator',
       'config-form-grid','market-legend','hover-ohlcv','latest-candle',
       'market-chart','chart-stream-status','boot-error','top-timeframe'
     ];
@@ -474,6 +495,8 @@ def test_ai_decisions_renderer_and_refresh_paths_are_safe(tmp_path):
           { title: 'Exchange hack loss', source: 'RSS' },
           { title: 'Macro neutral', source: 'RSS' },
           { title: 'ETF flow update', source: 'RSS' },
+          { title: 'Treasury stablecoin bill advances', source: 'RSS', publishedUtc: '2026-05-06T12:00:00+00:00' },
+          { title: 'Old Bitcoin cycle note', source: 'RSS', publishedUtc: '2025-12-01T12:00:00+00:00' },
         ],
       },
       refreshMs: 1000,
@@ -536,6 +559,13 @@ def test_ai_decisions_renderer_and_refresh_paths_are_safe(tmp_path):
         stateUi,
         renderAiDecisions,
         changeAiDecisionPage,
+        renderMacroCalendar,
+        changeMacroCalendarPage,
+        changeNewsPage,
+        macroCalendarEvents,
+        macroCalendarPageRows,
+        openConfigModal,
+        closeConfigModal,
         applyLiveMarketPayload,
         refresh,
       };
@@ -593,20 +623,94 @@ def test_ai_decisions_renderer_and_refresh_paths_are_safe(tmp_path):
     }));
     assert.ok(body.innerHTML.includes('live-row'));
     assert.ok(elements.get('server-time').textContent.includes('GST'));
-    assert.ok(elements.get('macro-calendar').innerHTML.includes('May 7'));
-    assert.ok(elements.get('macro-calendar').innerHTML.includes('Completed -'));
-    assert.ok(elements.get('macro-calendar').innerHTML.includes('Upcoming -'));
-    assert.ok(!elements.get('macro-calendar').innerHTML.includes('May 1'));
+    assert.ok(elements.get('completed-macro-calendar').innerHTML.includes('May 7'));
+    assert.ok(elements.get('completed-macro-calendar').innerHTML.includes('Completed -'));
+    assert.ok(!elements.get('completed-macro-calendar').innerHTML.includes('Upcoming -'));
+    assert.ok(!elements.get('completed-macro-calendar').innerHTML.includes('May 1'));
+    assert.ok(elements.get('completed-macro-calendar').innerHTML.includes('calendar-icon-day'));
+    assert.ok(elements.get('completed-macro-calendar').innerHTML.includes('calendar-icon-month'));
+    assert.ok(elements.get('completed-macro-calendar').innerHTML.includes('calendar-day-group'));
+    assert.ok(elements.get('completed-macro-calendar').innerHTML.includes('calendar-event-time'));
+    assert.ok(
+      elements.get('completed-macro-calendar').innerHTML.includes(
+        'US Data Window <span class="calendar-event-flag" title="United States">🇺🇸</span>',
+      ),
+    );
+    assert.ok(
+      elements.get('completed-macro-calendar').innerHTML.includes(
+        'Europe Macro / Yields Check <span class="calendar-event-flag" title="Europe">🇪🇺</span>',
+      ),
+    );
+    assert.ok(!elements.get('completed-macro-calendar').innerHTML.includes('calendar-icon-delta'));
+    assert.ok(!elements.get('completed-macro-calendar').innerHTML.includes('-0h30m'));
+    assert.ok(!elements.get('completed-macro-calendar').innerHTML.includes('<span class="calendar-meta">May 7'));
+    assert.ok(!elements.get('completed-macro-calendar').innerHTML.includes('status-chip'));
+    assert.ok(elements.get('upcoming-macro-calendar').innerHTML.includes('May 7'));
+    assert.ok(elements.get('upcoming-macro-calendar').innerHTML.includes('Upcoming -'));
+    assert.ok(!elements.get('upcoming-macro-calendar').innerHTML.includes('Completed -'));
+    assert.ok(elements.get('upcoming-macro-calendar').innerHTML.includes('calendar-day-group'));
+    assert.ok(
+      elements.get('upcoming-macro-calendar').innerHTML.includes(
+        'Asia Liquidity Open <span class="calendar-event-flag" title="Asia session">🇯🇵</span>',
+      ),
+    );
+    assert.ok(
+      elements.get('upcoming-macro-calendar').innerHTML.includes(
+        'Daily Close Risk Review <span class="calendar-event-flag" title="Global crypto close">🌐</span>',
+      ),
+    );
+    assert.ok(elements.get('upcoming-macro-calendar').innerHTML.includes('calendar-icon-delta'));
+    assert.ok(elements.get('upcoming-macro-calendar').innerHTML.includes('0h30m'));
+    assert.ok(elements.get('upcoming-macro-calendar').innerHTML.includes('5:30 PM GST (0h30m)'));
+    assert.ok(!elements.get('upcoming-macro-calendar').innerHTML.includes('<span class="calendar-meta">May 7'));
+    assert.ok(!elements.get('upcoming-macro-calendar').innerHTML.includes('status-chip'));
+    assert.strictEqual(
+      (elements.get('completed-macro-calendar').innerHTML.match(/class="calendar-row/g) || []).length,
+      8,
+    );
+    assert.strictEqual(
+      (elements.get('upcoming-macro-calendar').innerHTML.match(/class="calendar-row/g) || []).length,
+      7,
+    );
+    assert.ok(elements.get('completed-macro-page-indicator').textContent.includes('Page 1 /'));
+    assert.ok(elements.get('upcoming-macro-page-indicator').textContent.includes('Page 1 /'));
+    assert.ok(elements.get('completed-macro-year-filter').innerHTML.includes('2025'));
+    assert.ok(elements.get('upcoming-macro-year-filter').innerHTML.includes('2027'));
 
     (async () => {
       await assert.doesNotReject(async () => t.refresh());
       assert.ok(body.innerHTML.includes('refresh-row'));
       assert.ok(elements.get('server-time').textContent.includes('GST'));
-      assert.ok(elements.get('macro-calendar').innerHTML.includes('May 7'));
-      assert.ok(!elements.get('macro-calendar').innerHTML.includes('May 1'));
+      assert.ok(elements.get('completed-macro-calendar').innerHTML.includes('May 7'));
+      assert.ok(!elements.get('completed-macro-calendar').innerHTML.includes('May 1'));
+      assert.strictEqual(
+        (elements.get('completed-macro-calendar').innerHTML.match(/class="calendar-row/g) || []).length,
+        8,
+      );
+      assert.doesNotThrow(() => t.changeMacroCalendarPage('completed', 'next'));
+      assert.ok(elements.get('completed-macro-page-indicator').textContent.startsWith('Page 2 /'));
+      t.stateUi.macroCalendars.completed.monthFilter = '5';
+      t.stateUi.macroCalendars.completed.yearFilter = '2025';
+      t.stateUi.macroCalendars.completed.eventFilter = 'US Data Window';
+      t.stateUi.macroCalendars.completed.page = 0;
+      assert.doesNotThrow(() => t.renderMacroCalendar('2026-05-07T13:00:00+00:00'));
+      const filteredCalendar = elements.get('completed-macro-calendar').innerHTML;
+      assert.strictEqual((filteredCalendar.match(/class="calendar-row/g) || []).length, 10);
+      assert.ok(filteredCalendar.includes('US Data Window'));
+      assert.ok(!filteredCalendar.includes('Asia Liquidity Open'));
+      assert.strictEqual(elements.get('config-modal').hidden, undefined);
+      assert.doesNotThrow(() => t.openConfigModal());
+      assert.strictEqual(elements.get('config-modal').hidden, false);
+      assert.doesNotThrow(() => t.closeConfigModal());
+      assert.strictEqual(elements.get('config-modal').hidden, true);
       const renderedNews = elements.get('news-stack').innerHTML;
       assert.strictEqual((renderedNews.match(/class="news-card"/g) || []).length, 5);
       assert.ok(renderedNews.includes('Bitcoin raw rise'));
+      assert.ok(elements.get('news-page-indicator').textContent.includes('Page 1 / 2'));
+      assert.ok(!renderedNews.includes('Old Bitcoin cycle note'));
+      assert.doesNotThrow(() => t.changeNewsPage('next'));
+      assert.ok(elements.get('news-page-indicator').textContent.includes('Page 2 / 2'));
+      assert.ok(elements.get('news-stack').innerHTML.includes('ETF flow update'));
     })().catch(err => {
       console.error(err);
       process.exit(1);
@@ -1021,9 +1125,9 @@ def test_realtime_chart_bar_merge_semantics(tmp_path):
         equityUsdt: 500,
         btc: 0.001,
         position: { unrealizedPnlUsdt: 1.2 },
-        stats: { grid: {} },
+        stats: { grid: {}, ai: { model: 'qwen', riskAction: 'pause_new_buys', confidence: 0.75, stale: true, source: 'expired_signal' } },
       },
-      state: { aiEnabled: true, aiEndpointKey: 'local' },
+      state: { aiEnabled: true, aiEndpointKey: 'custom' },
       runtime: {
         savedAt: '2026-05-01T00:00:01+00:00',
         grid: { orders: [{ side: 'BUY', price: 77000, qty_btc: 0.001 }] },
@@ -1038,6 +1142,11 @@ def test_realtime_chart_bar_merge_semantics(tmp_path):
     assert.strictEqual(getElement('events-body').children.length, 1);
     assert.strictEqual(getElement('orders-body').children.length, 1);
     assert.ok(getElement('status-list').innerHTML.includes('Status timestamp'));
+    assert.ok(getElement('status-list').innerHTML.includes('Custom'));
+    assert.ok(!getElement('status-list').innerHTML.includes('custom</div>'));
+    assert.ok(getElement('status-list').innerHTML.includes('stale (expired signal)'));
+    assert.ok(!getElement('status-list').innerHTML.includes('AI action'));
+    assert.ok(!getElement('status-list').innerHTML.includes('pause_new_buys'));
 
     t.applyLiveMarketPayload({
       status: { price: 78100, stats: { grid: {} } },
