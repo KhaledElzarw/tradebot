@@ -326,7 +326,7 @@ def test_parse_json_object_embedded_empty_and_missing():
         dashboard_server._parse_json_object("plain text")
 
 
-def test_fallback_intelligence_pads_cards_and_scores_sentiment():
+def test_fallback_intelligence_scores_news_sentiment_without_padding():
     ohlcv = [
         {"open": 100.0, "high": 102.0, "low": 99.0, "close": 101.0},
         {"open": 101.0, "high": 112.0, "low": 100.0, "close": 111.0},
@@ -352,11 +352,7 @@ def test_fallback_intelligence_pads_cards_and_scores_sentiment():
         ],
     )
 
-    assert [card["sentiment"] for card in payload["newsCards"]] == [
-        "Bullish",
-        "Bearish",
-        *["Neutral"] * 8,
-    ]
+    assert [card["sentiment"] for card in payload["newsCards"]] == ["Bullish", "Bearish"]
     assert payload["newsCards"][0]["impact"] == 6
     assert payload["source"] == "deterministic_fallback"
     assert payload["regimeSignals"][-1]["status"] == "Watch"
@@ -461,6 +457,22 @@ def test_gst_server_time_and_macro_calendar_update_daily():
     assert "US Data Window" in naive_rendered_html
     assert "Completed - US data window passed" in completed_html
     assert "Upcoming - Watch ETF flow" in upcoming_html
+    assert (
+        'US Data Window <span class="calendar-event-flag" '
+        'title="United States">🇺🇸</span>'
+    ) in completed_html
+    assert (
+        'Europe Macro / Yields Check <span class="calendar-event-flag" '
+        'title="Europe">🇪🇺</span>'
+    ) in completed_html
+    assert (
+        'Asia Liquidity Open <span class="calendar-event-flag" '
+        'title="Asia session">🇯🇵</span>'
+    ) in upcoming_html
+    assert (
+        'Daily Close Risk Review <span class="calendar-event-flag" '
+        'title="Global crypto close">🌐</span>'
+    ) in upcoming_html
     assert completed_html.count('class="calendar-day-group') == 2
     assert upcoming_html.count('class="calendar-day-group') == 2
     assert completed_html.count('class="calendar-row') == 8
@@ -555,8 +567,8 @@ def test_format_and_server_render_helpers_cover_empty_and_value_rows():
     assert "Below market 10.00%" in orders_html
     assert impact_html.count("on green") == 3
     assert '<a href="https://example.test/story"' in news_html
-    assert many_news_html.count('class="news-card"') == 10
-    assert raw_padded_news_html.count('class="news-card"') == 10
+    assert many_news_html.count('class="news-card"') == 5
+    assert raw_padded_news_html.count('class="news-card"') == 5
     assert "Bitcoin raw rise" in raw_padded_news_html
     assert "Exchange hack loss" in raw_padded_news_html
     assert "var(--blue)" in signals_html
@@ -591,6 +603,12 @@ def test_fetch_news_items_parses_fake_rss_and_dedupes(monkeypatch):
     <pubDate>Mon, 04 May 2026 12:02:00</pubDate>
   </item>
   <item>
+    <title>Old BTC cycle recap</title>
+    <link>https://example.test/old-btc</link>
+    <description>Stale item outside dashboard history window</description>
+    <pubDate>Mon, 01 Dec 2025 12:02:00 GMT</pubDate>
+  </item>
+  <item>
     <title></title>
     <description>Untitled item is skipped</description>
   </item>
@@ -615,7 +633,10 @@ def test_fetch_news_items_parses_fake_rss_and_dedupes(monkeypatch):
     )
     monkeypatch.setattr(dashboard_server.requests, "get", fake_get)
 
-    items = dashboard_server._fetch_news_items(limit=3)
+    items = dashboard_server._fetch_news_items(
+        limit=3,
+        now=datetime(2026, 5, 8, tzinfo=timezone.utc),
+    )
     items_by_title = {item["title"]: item for item in items}
 
     assert set(items_by_title) == {
@@ -623,6 +644,7 @@ def test_fetch_news_items_parses_fake_rss_and_dedupes(monkeypatch):
         "Macro rates watch",
         "Bitcoin rally gains steam",
     }
+    assert "Old BTC cycle recap" not in items_by_title
     assert [item["title"] for item in items].count("Bitcoin rally gains steam") == 1
     assert items_by_title["Macro rates watch"]["publishedUtc"] == "not-a-date"
     assert items_by_title["BTC liquidity build"]["publishedUtc"] == (
@@ -630,6 +652,19 @@ def test_fetch_news_items_parses_fake_rss_and_dedupes(monkeypatch):
     )
     assert items_by_title["Bitcoin rally gains steam"]["source"] == "Fake RSS"
     assert all("sortTs" not in item and "score" not in item for item in items)
+
+
+def test_merge_news_history_keeps_recent_cached_items_and_drops_old():
+    merged = dashboard_server._merge_news_history(
+        [{"title": "Fresh story", "source": "RSS", "publishedUtc": "2026-05-08T10:00:00+00:00"}],
+        [
+            {"title": "Cached recent", "source": "Cache", "publishedUtc": "2026-04-10T10:00:00+00:00"},
+            {"title": "Too old", "source": "Cache", "publishedUtc": "2025-12-01T10:00:00+00:00"},
+        ],
+        now=datetime(2026, 5, 8, tzinfo=timezone.utc),
+    )
+
+    assert [item["title"] for item in merged] == ["Fresh story", "Cached recent"]
 
 
 def test_local_ai_assess_intelligence_uses_fake_ollama_and_openai(monkeypatch):

@@ -10,7 +10,8 @@ const GRID_MODE_LABELS = { scalpy: 'Scalpy', fatty: 'Fatty', ai_optimized: 'Opti
 const LEGACY_OPTIMIZED_MODES = new Set(['flexy', 'ai_optimized']);
 const SERVER_TIME_ZONE = 'Asia/Dubai';
 const GST_OFFSET_MS = 4 * 60 * 60 * 1000;
-const NEWS_CARD_LIMIT = 10;
+const NEWS_PAGE_SIZE = 5;
+const NEWS_HISTORY_DAYS = 90;
 const MACRO_CALENDAR_PAGE_SIZE = 10;
 const MACRO_CALENDAR_SIDE_SIZE = 5;
 const MACRO_CALENDAR_LOOKBACK_MONTHS = 12;
@@ -20,11 +21,11 @@ const MACRO_CALENDAR_KINDS = {
   upcoming: { prefix: 'upcoming-macro', status: 'Upcoming', empty: 'No upcoming macro events match the filters' },
 };
 const MACRO_CALENDAR_TEMPLATES = [
-  ['Asia Liquidity Open', 8, 0, 2, '#1767c2', 'Watch Asia liquidity, early dollar tone, and grid spread pressure.', 'Asia session set the initial liquidity tone for BTC spread and inventory risk.'],
-  ['Europe Macro / Yields Check', 12, 0, 2, '#f7931a', 'Watch EUR/US yields and risk appetite before the US data window.', 'Europe macro flow updated rate-pressure context for the active grid.'],
-  ['US Data Window', 16, 30, 3, '#0d8a2f', 'Watch scheduled US releases and liquidity reaction around the event.', 'US data window passed; confirm whether volatility expanded or faded.'],
-  ['US Cash Open / ETF Flow', 17, 30, 3, '#d54545', 'Watch ETF flow, equity beta, and headline reaction during the cash open.', 'US cash open flow is in; reassess BTC trend pressure and exposure.'],
-  ['Daily Close Risk Review', 23, 45, 2, '#13a7b4', 'Review realized PnL, open exposure, and overnight grid risk.', 'Daily risk review completed; carry only exposure justified by the regime.'],
+  ['Asia Liquidity Open', 8, 0, 2, '#1767c2', 'Watch Asia liquidity, early dollar tone, and grid spread pressure.', 'Asia session set the initial liquidity tone for BTC spread and inventory risk.', '🇯🇵', 'Asia session'],
+  ['Europe Macro / Yields Check', 12, 0, 2, '#f7931a', 'Watch EUR/US yields and risk appetite before the US data window.', 'Europe macro flow updated rate-pressure context for the active grid.', '🇪🇺', 'Europe'],
+  ['US Data Window', 16, 30, 3, '#0d8a2f', 'Watch scheduled US releases and liquidity reaction around the event.', 'US data window passed; confirm whether volatility expanded or faded.', '🇺🇸', 'United States'],
+  ['US Cash Open / ETF Flow', 17, 30, 3, '#d54545', 'Watch ETF flow, equity beta, and headline reaction during the cash open.', 'US cash open flow is in; reassess BTC trend pressure and exposure.', '🇺🇸', 'United States'],
+  ['Daily Close Risk Review', 23, 45, 2, '#13a7b4', 'Review realized PnL, open exposure, and overnight grid risk.', 'Daily risk review completed; carry only exposure justified by the regime.', '🌐', 'Global crypto close'],
 ];
 const INITIAL_QUERY = new URLSearchParams(window.location.search);
 function normalizeInitialTimeframe(tf) { return TIMEFRAMES.includes(tf) ? tf : '1m'; }
@@ -86,6 +87,8 @@ const stateUi = {
   activeAgentDecisionId: '',
   eventPage: -1,
   eventPageSize: 5,
+  newsPage: 0,
+  newsPageSize: NEWS_PAGE_SIZE,
   lastOrders: [],
   orderPage: -1,
   orderPageSize: 5,
@@ -157,6 +160,10 @@ document.getElementById('events-first-btn').addEventListener('click', () => chan
 document.getElementById('events-prev-btn').addEventListener('click', () => changeEventPage('prev'));
 document.getElementById('events-next-btn').addEventListener('click', () => changeEventPage('next'));
 document.getElementById('events-last-btn').addEventListener('click', () => changeEventPage('last'));
+bindClickIfPresent('news-first-btn', () => changeNewsPage('first'));
+bindClickIfPresent('news-prev-btn', () => changeNewsPage('prev'));
+bindClickIfPresent('news-next-btn', () => changeNewsPage('next'));
+bindClickIfPresent('news-last-btn', () => changeNewsPage('last'));
 bindClickIfPresent('ai-decisions-first-btn', () => changeAiDecisionPage('first'));
 bindClickIfPresent('ai-decisions-prev-btn', () => changeAiDecisionPage('prev'));
 bindClickIfPresent('ai-decisions-next-btn', () => changeAiDecisionPage('next'));
@@ -921,21 +928,51 @@ function renderLiveStatusFooter(status, state, runtime, data, grid) {
   const stats = status.stats || {};
   const aiEnabled = state.aiEnabled !== false;
   const ai = aiEnabled ? (stats.ai || runtime.ai || {}) : {};
-  const aiMode = aiEnabled ? [
-    ai.dryRun ? 'dry-run' : '',
-    ai.shadowMode ? 'shadow' : '',
-    ai.stale ? 'stale' : 'live',
-  ].filter(Boolean).join(' / ') : 'off';
+  const endpointLabel = aiEndpointDisplayLabel(data, state);
+  const aiMode = aiModeLabel(aiEnabled, ai);
   renderKVs('status-list', [
     ['Status timestamp', fmtDate(status.tsUtc), '', getChanged('status.tsUtc', status.tsUtc)],
     ['Runtime saved', fmtDate(runtime.savedAt), '', getChanged('runtime.savedAt', runtime.savedAt)],
     ['Grid status', grid.openOrders > 0 ? 'Active' : 'Idle', '', getChanged('status.grid', grid.openOrders)],
-    ['AI endpoint', data.aiEndpointLabel || state.aiEndpointKey || state.aiBaseUrl || '--', '', getChanged('status.aiEndpoint', data.aiEndpointLabel || state.aiBaseUrl)],
+    ['AI endpoint', endpointLabel, '', getChanged('status.aiEndpoint', endpointLabel)],
     ['AI model', ai.model || state.aiModel || '--', '', getChanged('status.aiModel', ai.model || state.aiModel)],
-    ['AI action', ai.riskAction || '--', '', getChanged('status.aiAction', ai.riskAction)],
     ['AI confidence', ai.confidence != null ? fmtPct(Number(ai.confidence)) : '--', '', getChanged('status.aiConfidence', ai.confidence)],
     ['AI mode', aiMode || '--', '', getChanged('status.aiMode', aiMode)],
   ]);
+}
+
+function titleCaseLabel(value) {
+  return String(value || '')
+    .split(/[\s_-]+/)
+    .filter(Boolean)
+    .map(part => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ');
+}
+
+function aiEndpointDisplayLabel(data, state) {
+  data = data || {};
+  state = state || {};
+  if (data.aiEndpointLabel) return data.aiEndpointLabel;
+  const key = data.aiEndpointKey || state.aiEndpointKey || '';
+  const endpoint = endpointForKey(key);
+  if (endpoint && endpoint.label) return endpoint.label;
+  if (key) return titleCaseLabel(key);
+  return state.aiBaseUrl || '--';
+}
+
+function aiModeLabel(aiEnabled, ai) {
+  if (!aiEnabled) return 'off';
+  ai = ai || {};
+  const parts = [];
+  if (ai.dryRun) parts.push('dry-run');
+  if (ai.shadowMode) parts.push('shadow');
+  if (ai.stale) {
+    const reason = String(ai.source || '').replace(/_/g, ' ').trim();
+    parts.push(reason ? `stale (${reason})` : 'stale');
+  } else {
+    parts.push('live');
+  }
+  return parts.join(' / ');
 }
 
 function impactBars(level, color = 'orange') {
@@ -949,41 +986,130 @@ function newsSentiment(title) {
   return 'Neutral';
 }
 
+function newsTimestamp(card) {
+  const raw = String((card && (card.publishedUtc || card.age)) || '').trim();
+  if (!raw || raw === 'latest' || raw === '30m refresh') return 0;
+  const parsed = Date.parse(raw);
+  if (Number.isFinite(parsed)) return parsed;
+  const normalized = Date.parse(raw.replace(' ', 'T'));
+  return Number.isFinite(normalized) ? normalized : 0;
+}
+
+function newsAgeLabel(card) {
+  const raw = String((card && (card.age || card.publishedUtc)) || 'latest');
+  return raw.slice(0, 16).replace('T', ' ');
+}
+
+function normalizeNewsCard(card, fromRaw = false) {
+  const title = String((card && card.title) || 'Crypto market update').trim();
+  if (!title || title === 'Awaiting fresh crypto headlines') return null;
+  const lower = title.toLowerCase();
+  const publishedUtc = String((card && card.publishedUtc) || '').trim();
+  return {
+    title,
+    source: (card && card.source) || (fromRaw ? 'RSS' : 'Local AI'),
+    age: newsAgeLabel(card || {}),
+    publishedUtc,
+    sentiment: (card && card.sentiment) || newsSentiment(title),
+    impact: (card && card.impact) || (lower.includes('bitcoin') || lower.includes('btc') ? 6 : 4),
+    url: (card && card.url) || '',
+  };
+}
+
 function normalizedNewsCards(intelligence) {
-  const cards = Array.isArray(intelligence && intelligence.newsCards)
-    ? intelligence.newsCards.filter(card => card && typeof card === 'object' && !Array.isArray(card)).map(card => ({ ...card }))
-    : [];
-  const seen = new Set(cards.map(card => String(card.title || '').trim().toLowerCase()));
+  const cards = [];
+  const seen = new Set();
+  const cutoffMs = Date.now() - (NEWS_HISTORY_DAYS * 24 * 60 * 60 * 1000);
+  const pushCard = (card, fromRaw = false) => {
+    if (!card || typeof card !== 'object' || Array.isArray(card)) return;
+    const normalized = normalizeNewsCard(card, fromRaw);
+    if (!normalized) return;
+    const ts = newsTimestamp(normalized);
+    if (ts && ts < cutoffMs) return;
+    const key = String(normalized.url || normalized.title).trim().toLowerCase();
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    cards.push({ ...normalized, _sortTs: ts });
+  };
+  if (Array.isArray(intelligence && intelligence.newsCards)) {
+    intelligence.newsCards.forEach(card => pushCard(card, false));
+  }
   const rawNews = Array.isArray(intelligence && intelligence.rawNews) ? intelligence.rawNews : [];
-  rawNews
-    .filter(item => item && typeof item === 'object' && !Array.isArray(item))
-    .forEach(item => {
-      const title = String(item.title || 'Crypto market update').trim();
-      const key = title.toLowerCase();
-      if (cards.length < NEWS_CARD_LIMIT && key && !seen.has(key)) {
-        const sentiment = newsSentiment(title);
-        cards.push({
-          title,
-          source: item.source || 'RSS',
-          age: String(item.publishedUtc || 'latest').slice(0, 16).replace('T', ' '),
-          sentiment,
-          impact: title.toLowerCase().includes('bitcoin') || title.toLowerCase().includes('btc') ? 6 : 4,
-          url: item.url || '',
-        });
-        seen.add(key);
-      }
-    });
-  while (cards.length < NEWS_CARD_LIMIT) {
-    cards.push({
+  rawNews.forEach(item => pushCard(item, true));
+  cards.sort((a, b) => Number(b._sortTs || 0) - Number(a._sortTs || 0));
+  if (!cards.length) {
+    return [{
       title: 'Awaiting fresh crypto headlines',
       source: 'Local',
       age: '30m refresh',
       sentiment: 'Neutral',
       impact: 3,
       url: '',
-    });
+    }];
   }
-  return cards.slice(0, NEWS_CARD_LIMIT);
+  return cards.map(card => {
+    const { _sortTs, ...clean } = card;
+    return clean;
+  });
+}
+
+function newsPageRows(cards, page = stateUi.newsPage) {
+  const rows = Array.isArray(cards) ? cards : [];
+  const totalPages = Math.max(1, Math.ceil(rows.length / stateUi.newsPageSize));
+  const pageIndex = Math.max(0, Math.min(totalPages - 1, Number(page || 0)));
+  const start = pageIndex * stateUi.newsPageSize;
+  return {
+    rows: rows.slice(start, start + stateUi.newsPageSize),
+    totalPages,
+    page: pageIndex,
+    totalEvents: rows.length,
+  };
+}
+
+function renderNewsPager(totalPages, totalEvents) {
+  const suffix = totalEvents === 1 ? 'story' : 'stories';
+  setTextIfPresent('news-page-indicator', `Page ${stateUi.newsPage + 1} / ${totalPages} • ${totalEvents} ${suffix}`);
+  ['first', 'prev'].forEach(name => {
+    const btn = document.getElementById(`news-${name}-btn`);
+    if (btn) btn.disabled = stateUi.newsPage <= 0;
+  });
+  ['next', 'last'].forEach(name => {
+    const btn = document.getElementById(`news-${name}-btn`);
+    if (btn) btn.disabled = stateUi.newsPage >= totalPages - 1;
+  });
+}
+
+function renderNewsCards(cards) {
+  const pageData = newsPageRows(cards);
+  stateUi.newsPage = pageData.page;
+  document.getElementById('news-stack').innerHTML = pageData.rows.map(card => {
+    const sentiment = card.sentiment || 'Neutral';
+    const color = sentiment.toLowerCase() === 'bullish' ? 'green' : 'orange';
+    const url = card.url || '';
+    const title = url ? `<a href="${escapeHtml(url)}" target="_blank" rel="noreferrer">${escapeHtml(card.title || 'Crypto market update')}</a>` : escapeHtml(card.title || 'Crypto market update');
+    return `
+      <div class="news-card">
+        <div class="news-title">${title}</div>
+        <div class="news-row">
+          <div><span class="source-chip">${escapeHtml(card.source || 'Local AI')}</span> <span class="news-meta">${escapeHtml(card.age || '30m refresh')}</span></div>
+          <span class="sentiment-chip ${color === 'green' ? 'bullish' : 'neutral'}">${escapeHtml(sentiment)}</span>
+        </div>
+        <div class="news-meta" style="margin-bottom:6px">Impact</div>
+        ${impactBars(card.impact || 4, color)}
+      </div>
+    `;
+  }).join('');
+  renderNewsPager(pageData.totalPages, pageData.totalEvents);
+}
+
+function changeNewsPage(direction) {
+  const cards = normalizedNewsCards(stateUi.lastIntelligence || {});
+  const totalPages = Math.max(1, Math.ceil(cards.length / stateUi.newsPageSize));
+  if (direction === 'first') stateUi.newsPage = 0;
+  if (direction === 'last') stateUi.newsPage = totalPages - 1;
+  if (direction === 'prev') stateUi.newsPage = Math.max(0, stateUi.newsPage - 1);
+  if (direction === 'next') stateUi.newsPage = Math.min(totalPages - 1, stateUi.newsPage + 1);
+  renderNewsCards(cards);
 }
 
 function renderIntelligence(status, cumulative, runtime, intelligence) {
@@ -991,24 +1117,7 @@ function renderIntelligence(status, cumulative, runtime, intelligence) {
     && ((Array.isArray(intelligence.newsCards) && intelligence.newsCards.length)
       || (Array.isArray(intelligence.rawNews) && intelligence.rawNews.length));
   if (hasIntelligenceNews) {
-    const intelligenceCards = normalizedNewsCards(intelligence);
-    document.getElementById('news-stack').innerHTML = intelligenceCards.map(card => {
-      const sentiment = card.sentiment || 'Neutral';
-      const color = sentiment.toLowerCase() === 'bullish' ? 'green' : 'orange';
-      const url = card.url || '';
-      const title = url ? `<a href="${escapeHtml(url)}" target="_blank" rel="noreferrer">${escapeHtml(card.title || 'Crypto market update')}</a>` : escapeHtml(card.title || 'Crypto market update');
-      return `
-        <div class="news-card">
-          <div class="news-title">${title}</div>
-          <div class="news-row">
-            <div><span class="source-chip">${escapeHtml(card.source || 'Local AI')}</span> <span class="news-meta">${escapeHtml(card.age || '30m refresh')}</span></div>
-            <span class="sentiment-chip ${color === 'green' ? 'bullish' : 'neutral'}">${escapeHtml(sentiment)}</span>
-          </div>
-          <div class="news-meta" style="margin-bottom:6px">Impact</div>
-          ${impactBars(card.impact || 4, color)}
-        </div>
-      `;
-    }).join('');
+    renderNewsCards(normalizedNewsCards(intelligence));
     return;
   }
   cumulative = cumulative || {};
@@ -1059,7 +1168,7 @@ function renderIntelligence(status, cumulative, runtime, intelligence) {
       impact: 4,
     },
   ];
-  while (cards.length < NEWS_CARD_LIMIT) {
+  while (cards.length < NEWS_PAGE_SIZE) {
     cards.push({
       title: 'Awaiting fresh crypto headlines',
       source: 'Local',
@@ -1069,17 +1178,8 @@ function renderIntelligence(status, cumulative, runtime, intelligence) {
       impact: 3,
     });
   }
-  document.getElementById('news-stack').innerHTML = cards.map(card => `
-    <div class="news-card">
-      <div class="news-title">${card.title}</div>
-      <div class="news-row">
-        <div><span class="source-chip">${card.source}</span> <span class="news-meta">${card.age}</span></div>
-        <span class="sentiment-chip ${card.color === 'green' ? 'bullish' : 'neutral'}">${card.sentiment}</span>
-      </div>
-      <div class="news-meta" style="margin-bottom:6px">Impact</div>
-      ${impactBars(card.impact, card.color)}
-    </div>
-  `).join('');
+  stateUi.newsPage = 0;
+  renderNewsCards(cards);
 }
 
 function regimeRows(status, runtime) {
@@ -1189,7 +1289,7 @@ function macroCalendarEvents(serverTimeUtc) {
   for (let offset = -MACRO_CALENDAR_LOOKBACK_MONTHS; offset <= MACRO_CALENDAR_LOOKAHEAD_MONTHS; offset += 1) {
     const shifted = shiftMonth(year, monthIndex, offset);
     for (let day = 1; day <= daysInMonth(shifted.year, shifted.monthIndex); day += 1) {
-      MACRO_CALENDAR_TEMPLATES.forEach(([title, hour, minute, impact, color, upcoming, completed]) => {
+      MACRO_CALENDAR_TEMPLATES.forEach(([title, hour, minute, impact, color, upcoming, completed, geoFlag, geoLabel]) => {
         const eventUtcMs = Date.UTC(shifted.year, shifted.monthIndex, day, hour - 4, minute, 0, 0);
         const eventGst = new Date(eventUtcMs + GST_OFFSET_MS);
         const done = nowUtcMs >= eventUtcMs;
@@ -1206,6 +1306,8 @@ function macroCalendarEvents(serverTimeUtc) {
           sortTs: eventUtcMs,
           impact,
           color,
+          geoFlag,
+          geoLabel,
           status: done ? 'Completed' : 'Upcoming',
           summary: done ? completed : upcoming,
         });
@@ -1437,16 +1539,20 @@ function renderMacroCalendar(serverTimeUtc) {
       <div class="calendar-day-group ${(group.events[0] || {}).status.toLowerCase()}">
         ${macroCalendarBadge(group.events[0] || {}, nowUtcMs)}
         <div class="calendar-day-events">
-          ${(group.events || []).map(ev => `
+          ${(group.events || []).map(ev => {
+            const flag = ev.geoFlag
+              ? ` <span class="calendar-event-flag" title="${escapeHtml(ev.geoLabel || '')}">${escapeHtml(ev.geoFlag)}</span>`
+              : '';
+            return `
             <div class="calendar-row ${ev.status.toLowerCase()}">
               <div class="calendar-main">
-                <strong>${escapeHtml(ev.title)}</strong>
+                <strong>${escapeHtml(ev.title)}${flag}</strong>
                 <div class="calendar-event-time">${escapeHtml(macroCalendarEventTime(ev, nowUtcMs))}</div>
                 <div class="calendar-summary">${escapeHtml(ev.status)} - ${escapeHtml(ev.summary)}</div>
               </div>
               <div class="calendar-impact"><div class="calendar-meta" style="margin-bottom:5px">Impact</div><div class="impact-dots">${Array.from({ length: 3 }, (_, i) => `<span class="${i < ev.impact ? 'on' : ''}"></span>`).join('')}</div></div>
             </div>
-          `).join('')}
+          `; }).join('')}
         </div>
       </div>
     `).join('');

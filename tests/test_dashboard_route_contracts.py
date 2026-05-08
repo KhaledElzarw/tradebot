@@ -140,8 +140,8 @@ def test_root_dashboard_route_returns_html_shell(monkeypatch):
     html = body.decode("utf-8")
     assert status == 200
     assert headers["Content-Type"].startswith("text/html")
-    assert '<script src="/static/dashboard.v1.js?v=18"></script>' in html
-    assert 'href="/static/dashboard.v1.css?v=18"' in html
+    assert '<script src="/static/dashboard.v1.js?v=20"></script>' in html
+    assert 'href="/static/dashboard.v1.css?v=20"' in html
     assert "Server Time" in html
     assert "May 1 2026 UTC" not in html
     assert "BTCUSDT" in html
@@ -161,6 +161,11 @@ def test_root_dashboard_route_returns_html_shell(monkeypatch):
         "chart-price-pill",
         "hover-ohlcv",
         "news-stack",
+        "news-first-btn",
+        "news-prev-btn",
+        "news-next-btn",
+        "news-last-btn",
+        "news-page-indicator",
         "signal-table",
         "completed-macro-card",
         "completed-macro-calendar",
@@ -217,7 +222,7 @@ def test_static_route_serves_dashboard_js_asset(monkeypatch, tmp_path):
 
     server = _start_server()
     try:
-        status, headers, body = _request(server, "/static/dashboard.v1.js?v=18")
+        status, headers, body = _request(server, "/static/dashboard.v1.js?v=20")
     finally:
         server.shutdown()
         server.server_close()

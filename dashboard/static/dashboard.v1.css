@@ -324,13 +324,14 @@
       color:var(--red); border-radius:8px; padding:10px 12px; font-weight:800;
     }
     .news-stack, .calendar-list { display:flex; flex-direction:column; gap:10px; }
+    .news-stack { flex:1; min-height:0; overflow:auto; padding-right:2px; }
     .calendar-list { flex:1; min-height:0; overflow:auto; padding-right:2px; }
     .calendar-toolbar { display:grid; grid-template-columns:repeat(3, minmax(0, 1fr)); gap:8px; }
     .calendar-toolbar select {
       width:100%; min-width:0; background:var(--panel-3); color:var(--text);
       border:1px solid var(--line); border-radius:8px; padding:8px 10px; font:inherit; font-size:.84rem;
     }
-    .calendar-pager { margin-top:auto; }
+    .calendar-pager, .news-pager { margin-top:auto; }
     .news-card, .calendar-day-group { border:1px solid var(--line); border-radius:8px; background:var(--panel-3); padding:12px; }
     .news-title { font-size:1.03rem; line-height:1.2; font-weight:850; margin-bottom:10px; }
     .news-row { display:flex; justify-content:space-between; gap:8px; align-items:center; margin-bottom:10px; }
@@ -364,6 +365,7 @@
     .calendar-icon-month { font-size:.68rem; line-height:.82; text-transform:uppercase; }
     .calendar-icon-delta { font-size:.62rem; line-height:.82; white-space:nowrap; }
     .calendar-main { min-width:0; display:flex; flex-direction:column; gap:5px; }
+    .calendar-event-flag { white-space:nowrap; }
     .calendar-event-time { color:var(--muted); font-size:.76rem; font-weight:800; text-transform:uppercase; }
     .calendar-summary { color:var(--muted); line-height:1.35; font-size:.84rem; overflow-wrap:anywhere; }
     .calendar-impact { min-width:70px; }

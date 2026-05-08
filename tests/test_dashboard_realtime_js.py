@@ -447,6 +447,7 @@ def test_ai_decisions_renderer_and_refresh_paths_are_safe(tmp_path):
       'chart-quote-line','status-list','events-body','events-page-indicator',
       'ai-decisions-body','ai-decisions-page-indicator','orders-body',
       'orders-page-indicator','timeframe-controls','news-stack','signal-table',
+      'news-first-btn','news-prev-btn','news-next-btn','news-last-btn','news-page-indicator',
       'final-regime-title','final-regime-copy','regime-updated',
       'completed-macro-calendar','completed-macro-month-filter',
       'completed-macro-year-filter','completed-macro-event-filter',
@@ -494,6 +495,8 @@ def test_ai_decisions_renderer_and_refresh_paths_are_safe(tmp_path):
           { title: 'Exchange hack loss', source: 'RSS' },
           { title: 'Macro neutral', source: 'RSS' },
           { title: 'ETF flow update', source: 'RSS' },
+          { title: 'Treasury stablecoin bill advances', source: 'RSS', publishedUtc: '2026-05-06T12:00:00+00:00' },
+          { title: 'Old Bitcoin cycle note', source: 'RSS', publishedUtc: '2025-12-01T12:00:00+00:00' },
         ],
       },
       refreshMs: 1000,
@@ -558,6 +561,7 @@ def test_ai_decisions_renderer_and_refresh_paths_are_safe(tmp_path):
         changeAiDecisionPage,
         renderMacroCalendar,
         changeMacroCalendarPage,
+        changeNewsPage,
         macroCalendarEvents,
         macroCalendarPageRows,
         openConfigModal,
@@ -627,6 +631,16 @@ def test_ai_decisions_renderer_and_refresh_paths_are_safe(tmp_path):
     assert.ok(elements.get('completed-macro-calendar').innerHTML.includes('calendar-icon-month'));
     assert.ok(elements.get('completed-macro-calendar').innerHTML.includes('calendar-day-group'));
     assert.ok(elements.get('completed-macro-calendar').innerHTML.includes('calendar-event-time'));
+    assert.ok(
+      elements.get('completed-macro-calendar').innerHTML.includes(
+        'US Data Window <span class="calendar-event-flag" title="United States">🇺🇸</span>',
+      ),
+    );
+    assert.ok(
+      elements.get('completed-macro-calendar').innerHTML.includes(
+        'Europe Macro / Yields Check <span class="calendar-event-flag" title="Europe">🇪🇺</span>',
+      ),
+    );
     assert.ok(!elements.get('completed-macro-calendar').innerHTML.includes('calendar-icon-delta'));
     assert.ok(!elements.get('completed-macro-calendar').innerHTML.includes('-0h30m'));
     assert.ok(!elements.get('completed-macro-calendar').innerHTML.includes('<span class="calendar-meta">May 7'));
@@ -635,6 +649,16 @@ def test_ai_decisions_renderer_and_refresh_paths_are_safe(tmp_path):
     assert.ok(elements.get('upcoming-macro-calendar').innerHTML.includes('Upcoming -'));
     assert.ok(!elements.get('upcoming-macro-calendar').innerHTML.includes('Completed -'));
     assert.ok(elements.get('upcoming-macro-calendar').innerHTML.includes('calendar-day-group'));
+    assert.ok(
+      elements.get('upcoming-macro-calendar').innerHTML.includes(
+        'Asia Liquidity Open <span class="calendar-event-flag" title="Asia session">🇯🇵</span>',
+      ),
+    );
+    assert.ok(
+      elements.get('upcoming-macro-calendar').innerHTML.includes(
+        'Daily Close Risk Review <span class="calendar-event-flag" title="Global crypto close">🌐</span>',
+      ),
+    );
     assert.ok(elements.get('upcoming-macro-calendar').innerHTML.includes('calendar-icon-delta'));
     assert.ok(elements.get('upcoming-macro-calendar').innerHTML.includes('0h30m'));
     assert.ok(elements.get('upcoming-macro-calendar').innerHTML.includes('5:30 PM GST (0h30m)'));
@@ -680,8 +704,13 @@ def test_ai_decisions_renderer_and_refresh_paths_are_safe(tmp_path):
       assert.doesNotThrow(() => t.closeConfigModal());
       assert.strictEqual(elements.get('config-modal').hidden, true);
       const renderedNews = elements.get('news-stack').innerHTML;
-      assert.strictEqual((renderedNews.match(/class="news-card"/g) || []).length, 10);
+      assert.strictEqual((renderedNews.match(/class="news-card"/g) || []).length, 5);
       assert.ok(renderedNews.includes('Bitcoin raw rise'));
+      assert.ok(elements.get('news-page-indicator').textContent.includes('Page 1 / 2'));
+      assert.ok(!renderedNews.includes('Old Bitcoin cycle note'));
+      assert.doesNotThrow(() => t.changeNewsPage('next'));
+      assert.ok(elements.get('news-page-indicator').textContent.includes('Page 2 / 2'));
+      assert.ok(elements.get('news-stack').innerHTML.includes('ETF flow update'));
     })().catch(err => {
       console.error(err);
       process.exit(1);
@@ -1096,9 +1125,9 @@ def test_realtime_chart_bar_merge_semantics(tmp_path):
         equityUsdt: 500,
         btc: 0.001,
         position: { unrealizedPnlUsdt: 1.2 },
-        stats: { grid: {} },
+        stats: { grid: {}, ai: { model: 'qwen', riskAction: 'pause_new_buys', confidence: 0.75, stale: true, source: 'expired_signal' } },
       },
-      state: { aiEnabled: true, aiEndpointKey: 'local' },
+      state: { aiEnabled: true, aiEndpointKey: 'custom' },
       runtime: {
         savedAt: '2026-05-01T00:00:01+00:00',
         grid: { orders: [{ side: 'BUY', price: 77000, qty_btc: 0.001 }] },
@@ -1113,6 +1142,11 @@ def test_realtime_chart_bar_merge_semantics(tmp_path):
     assert.strictEqual(getElement('events-body').children.length, 1);
     assert.strictEqual(getElement('orders-body').children.length, 1);
     assert.ok(getElement('status-list').innerHTML.includes('Status timestamp'));
+    assert.ok(getElement('status-list').innerHTML.includes('Custom'));
+    assert.ok(!getElement('status-list').innerHTML.includes('custom</div>'));
+    assert.ok(getElement('status-list').innerHTML.includes('stale (expired signal)'));
+    assert.ok(!getElement('status-list').innerHTML.includes('AI action'));
+    assert.ok(!getElement('status-list').innerHTML.includes('pause_new_buys'));
 
     t.applyLiveMarketPayload({
       status: { price: 78100, stats: { grid: {} } },
